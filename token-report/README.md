@@ -61,19 +61,24 @@ Claude Code compacts idle chats only from 200k up. Below that, you come back to 
 
 ## Install
 
-Token Report is a mod for the Code tab of the Claude desktop app, built and tested there (Claude Code 2.1.309). The terminal is untested.
+**In the Claude desktop app** (Code tab):
 
-In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `byMarcoVogt/mods`, then **Add plugin** and pick `token-report`.
+1. Click **+** next to the prompt box, then **Plugins**.
+2. **Add marketplace**: `byMarcoVogt/mods`
+3. **Add plugin**: `token-report`
 
-From a terminal session:
+**In a terminal session:**
 
 ```
 /plugin install token-report --marketplace byMarcoVogt/mods
 ```
 
-Answer `y` to add the marketplace, then pick the user scope. The band shows up in the next session.
+The band shows up in your next session.
 
-**Update:** `/plugin marketplace update bymarcovogt-mods`. **Uninstall:** `/plugin uninstall token-report`.
+- **Update:** `/plugin marketplace update bymarcovogt-mods`
+- **Uninstall:** `/plugin uninstall token-report`
+
+Built and tested in the desktop app (Claude Code 2.1.309). The terminal is untested.
 
 ## License
 
