@@ -1,0 +1,12 @@
+{
+  "name": "bymarcovogt-mods",
+  "owner": { "name": "Marco Vogt" },
+  "description": "Mods for the Claude desktop app's Code tab.",
+  "plugins": [
+    {
+      "name": "token-report",
+      "source": "./token-report",
+      "description": "Context, cache and cost at a glance above the prompt, and a Settings pane for the cache and the context while you are away."
+    }
+  ]
+}
