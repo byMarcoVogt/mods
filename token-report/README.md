@@ -2,75 +2,107 @@
 
 ![The Token Report band (marked) above the prompt, under a row of other mods: Context 125k, up 1k in the last turn, Cache 59m, Session about 0.69 €, 5h limit 74% with its reset in 1h 8m, Weekly 49%.](../visual-assets/token-report/band-warm.webp)
 
-| Pain point | What Token Report does |
+<h4 align="center">What does it do?</h4>
+
+<p align="center">It shows above the prompt what your chat costs and when its cache goes cold,<br>
+and it decides what happens to the chat while you are away.</p>
+
+<h4 align="center">Why?</h4>
+
+<p align="center">A coffee break can turn a $0.06 message into a $1.20 one,<br>
+and Claude Code does not tell you.</p>
+
+## Why a pause costs money
+
+Every message sends the whole chat again. While the prompt cache is warm, that is a cache read, a tenth of the input price. Once the cache has gone cold, the next message writes the whole chat into the cache again, at twice the input price on a 1-hour cache.
+
+| A 150k chat on Opus 5.5 | Your next message costs |
 |---|---|
-| **Cache.** A long chat is cheap while its cache is warm and expensive once it goes cold. Claude Code does not show when that happens. | The band counts down the minutes until the cache goes cold. Before an expensive send on a cold cache, a dialog asks first. While you are away, it keeps the cache warm or compacts, as you choose. |
-| **Context.** The chat grows quietly until Claude Code compacts it at its own limit. | The band shows the chat's size and how much the last turn added. At your threshold it reminds you, asks or compacts. |
-| **Cost.** You don't see what a session costs, or how much of your plan is left. | The band shows the session's cost (at API prices on a subscription) and your 5-hour and weekly limits. |
+| Cache warm | ≈ $0.06 |
+| Cache cold | ≈ $1.20, 20 times as much |
+
+The cache lives 1 hour on a subscription and 5 minutes with an API key. On a subscription nothing is billed per message, so you never see the jump. It counts against your plan limits instead. Token Report shows every amount at API prices.
 
 ## The band
 
-- **Context** in tokens, with the growth of the last turn. It turns orange and then red as it nears your threshold.
-- **Cache**: minutes until the cache goes cold. Cold means the next message re-reads the whole chat at the write price.
-- **Session** cost. On a subscription this is what the session would cost at API prices.
-- **Plan limits** (5 hours and weekly) with their reset time, on a subscription.
-- **⤓** compacts the chat now, while the cache is warm.
+- **Context**: the chat's size and what the last turn added. It turns orange, then red, as it nears your threshold.
+- **Cache**: minutes until the cache goes cold.
+- **Session**: what this session has cost so far.
+- **5h** and **Weekly**: your plan limits and when they reset, on a subscription.
+- **≣ Report** opens Settings. **⤓** compacts the chat now, while the cache is warm.
 
 Once the cache has gone cold, the band says what the next send costs:
 
 <img src="../visual-assets/token-report/band-cold.webp" width="720" alt="The band (marked): Context 133k, the cache cold, the next send rewriting 133k for about 0.95 €, Session about 16.15 €, Weekly 36%.">
 
+## Before a cold send
+
+If the cache has gone cold and your message would cost more than a set amount (0.50 by default), a dialog asks first:
+
+<img src="../visual-assets/token-report/cold-dialog.webp" width="400" alt="The cold-send dialog on a 5-minute cache, in a desktop app set to German: Your chat went cold. Sending reloads all 124k (about 0.55 €). Compacting first costs about the same now, but every later message is cheaper. Choices: Send anyway, Compact, then send, Cancel.">
+
+- **Send anyway.** The whole chat is written into the cache again.
+- **Compact, then send.** The chat is compacted first, then your message goes again on the small chat. It costs about the same now, but every later message is cheaper. If Claude Code already wrote a summary while you were away, this choice reads **Use the summary** and costs almost nothing.
+- **Cancel.** Nothing is sent. Closing the dialog cancels too.
+
+## When you're away
+
+Claude Code handles pauses on its own, but only for big chats. From its idle threshold up (200k by default), it writes a summary about 54 minutes into a pause and puts it in when you come back. Below that threshold it does nothing. You come back to a cold, full chat, and the next send rewrites all of it.
+
+Token Report lets you decide, with two questions. Keep the cache warm, or let it go cold? Keep the full chat, or compact it?
+
+| | Keep the full chat | Compact the chat |
+|---|---|---|
+| **Let the cache go cold** | **Keep full** (default). Nothing happens. You come back to the full chat, cold. | **Compact.** Compacted once, while still warm. You come back to a small chat. |
+| **Keep the cache warm first** | **Cache Warmer, then keep full.** Warm for a set time, then it goes cold. | **Cache Warmer, then compact.** Warm for a set time, then compacted while still warm. |
+
+- **Keep full** spends nothing. It also refuses Claude Code's idle summary, so nothing changes your chat while you are away. If you come back cold, the dialog asks before the expensive send.
+- **Compact** fills the gap Claude Code leaves. Below its idle threshold, the mod compacts once per pause, 10 minutes before a 1-hour cache goes cold, for chats of 50k and more. The chat is still warm then, so the compaction costs a cache read and a short summary. From the threshold up, Claude Code's own summary does the job. On a 5-minute cache the mod does not compact.
+- **Cache Warmer** sends a tiny request shortly before the cache expires. It reads the chat (≈ $0.06 at 150k) and resets the clock. It runs for 1, 2 or 5 hours after your last message on a 1-hour cache, or 15, 30 or 45 minutes on a 5-minute cache. If Claude Code writes its summary meanwhile, the mod holds it back, because putting it in would throw away the warm cache you paid for. When the time is up, **then compact** compacts while still warm (with Claude Code's summary, if there is one), and **then keep full** lets the cache go cold.
+
+How this works with Claude Code's own idle compaction:
+
+| Your chat in a pause | Claude Code alone | With Token Report |
+|---|---|---|
+| Below the idle threshold (200k) | Nothing. You come back cold and full. | **Keep full**: the same, and the dialog asks first. **Compact**: the mod compacts before the cache goes cold. |
+| From the idle threshold up | Its summary goes in when you come back. | **Keep full**: the summary is refused. **Compact**: Claude Code's summary is used. **Cache Warmer, then compact**: the summary waits until the warmer ends. **Cache Warmer, then keep full**: refused. |
+
+**Which one?** On a 1-hour cache the warmer pings once an hour, and 20 pings cost about one cold send. So warming pays for a pause of a few hours, not for the night. On a 5-minute cache it pings about every 4 minutes, so 45 minutes cost about one cold send, and that is where its choices stop. Compact is the cheapest way back, at the price of detail. Keep full costs nothing and asks before anything costs.
+
+Claude Code's own switches still apply, and the mod reads them. `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` sets the idle threshold (100k at least). `"idleCompaction": false` turns Claude Code's idle compaction off. `"promptCacheTtl": "5m"` or `"1h"` sets the cache lifetime.
+
+## At the threshold
+
+The chat grows until Claude Code compacts it at its own limit. Token Report lets you act earlier. At a context size you set (400k by default), it reminds you (default), asks, or compacts, and again every further 100k. Right after a turn the cache is warm, so that is the cheap moment to compact.
+
+**/compact instructions** you add go with every compaction the mod starts and with Claude Code's idle summary.
+
 ## Settings
 
-**≣ Report** on the band, or `/tokens`, opens the Settings pane. The four cards on top show the chat's size, the cache, the session's cost and your plan. Below them, the settings in four groups: Plan, Money, Cache management and Context management.
+**≣ Report** on the band, or `/tokens`, opens the Settings pane. Four cards on top show the chat's size, the cache, the session's cost and your plan.
 
 <img src="../visual-assets/token-report/settings.webp" width="440" alt="The Settings pane: cards for Chat 260k, Cache 59m, Session about 68.19 €, Plan subscription, then the groups Plan, Money, Cache management and Context management.">
 
-Settings apply to:
+Changes apply to:
 
 1. **Global**: every session.
 2. **Project**: a `.token-report/settings.json` in the project folder, for everyone who opens that folder.
 3. **Session**: this chat only.
 
-### When you're away
-
-Two questions, four choices:
-
-| | Compact the chat | Keep the full chat |
-|---|---|---|
-| **Let the cache go cold** | **Compact** | **Keep full** (default) |
-| **Keep the cache warm first** | **Cache Warmer, then compact** | **Cache Warmer, then keep full** |
-
-- **Compact.** Claude Code compacts idle chats itself from its idle threshold on (200k by default). Below that threshold, Token Report compacts once per pause, 10 minutes before a 1-hour cache goes cold, for chats of 50k and more. On a 5-minute cache it does nothing. One compaction reads the chat while it is still warm and writes a summary.
-- **Keep full** (default). Nothing compacts while you are away. Claude Code's own idle summary is refused as well, and the full chat stays. Out of the box the mod spends no tokens on its own.
-- **Cache Warmer.** A short request reads the chat a few minutes before the cache would expire, for a set time after your last message: 1, 2 or 5 hours on a 1-hour cache, or 15, 30 or 45 minutes on a 5-minute cache. Each ping costs a cache read of the chat. Then it compacts or keeps the full chat, as chosen.
-
-### Other settings
-
 | Setting | Choices | Default |
 |---|---|---|
 | Plan type | Detect automatically, Subscription, API key | Detect |
-| Currency | $, € | $ |
+| Currency | $, € (ECB rate) | $ |
+| When you're away | Keep full, Compact, Cache Warmer then compact, Cache Warmer then keep full | Keep full |
+| Cache Warmer for | 1, 2 or 5 hours (15, 30 or 45 minutes on a 5-minute cache) | 1 hour |
 | Ask before a cold send | Never, Above 0.25, Above 0.50, Above 1.00, Always | Above 0.50 |
 | Threshold | 200k, 300k, 400k, 600k, Max, Custom (50k at least) | 400k |
 | At the threshold | Off, Reminder, Ask, Compact | Reminder |
 | /compact | No added instructions, Added instructions | None |
 
-- **Ask before a cold send.** If the cache has gone cold and your message would cost more than the amount you set, a dialog asks first. Its choices are **Send anyway**, **Compact, then send** (your message goes again on the small chat), or **Cancel**. Closing the dialog cancels. If Claude Code already wrote an idle summary, the middle choice is **Use the summary**.
-
-  <img src="../visual-assets/token-report/cold-dialog.webp" width="400" alt="The cold-send dialog, in a desktop app set to German: Your chat went cold. Sending reloads all 124k (about 0.55 €). Compacting first costs about the same now, but every later message is cheaper. Choices: Send anyway, Compact, then send, Cancel.">
-
-- **At the threshold.** The Reminder and Ask come back every further 100k.
-- **/compact instructions** go with every compaction the mod starts and with Claude Code's idle summary.
-
-Claude Code's own switches still apply. `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` sets the idle threshold (minimum 100k), and the mod reads it. `"idleCompaction": false` in Claude Code's settings turns idle compaction off. `"promptCacheTtl": "5m"` or `"1h"` sets the cache lifetime.
-
 ## What it costs
 
-Watching costs nothing. The band reads usage that Claude Code already has and changes nothing Claude reads. Tokens are spent only:
-
-- by a compaction: **Compact** while you are away, **Compact** at the threshold, **⤓**, or **Compact, then send**
-- by Cache Warmer pings, if you choose a Cache Warmer. On a 150k chat with Opus, a ping costs about $0.06 at API prices.
+Watching costs nothing. The band reads usage that Claude Code already has and changes nothing Claude reads. Out of the box the mod spends no tokens. Tokens go only to what you choose: a compaction (while you are away, at the threshold, ⤓, or Compact, then send) and Cache Warmer pings.
 
 ## Install
 
@@ -84,7 +116,7 @@ From a terminal session:
 /plugin install token-report --marketplace byMarcoVogt/mods
 ```
 
-Answer `y` to add the marketplace, then pick the user scope. The band shows up in the next session. `/tokens` opens the Settings pane, and so does **≣ Report** on the band.
+Answer `y` to add the marketplace, then pick the user scope. The band shows up in the next session.
 
 **Update:** `/plugin marketplace update bymarcovogt-mods`. **Uninstall:** `/plugin uninstall token-report`.
 
