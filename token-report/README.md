@@ -25,7 +25,7 @@ The cache lives 1 hour on a subscription and 5 minutes with an API key. On a sub
 
 ## The band
 
-- **Context**: the chat's size and what the last turn added. It turns orange, then red, as it nears your threshold.
+- **Context**: the chat's size and what the last turn added. At your threshold (400k by default) it reminds you, asks or compacts.
 - **Cache**: minutes until the cache goes cold.
 - **Session**: what this session has cost so far.
 - **5h** and **Weekly**: your plan limits and when they reset, on a subscription.
@@ -47,35 +47,16 @@ If the cache has gone cold and your message would cost more than a set amount (0
 
 ## When you're away
 
-Claude Code handles pauses on its own, but only for big chats. From its idle threshold up (200k by default), it writes a summary about 54 minutes into a pause and puts it in when you come back. Below that threshold it does nothing. You come back to a cold, full chat, and the next send rewrites all of it.
-
-Token Report lets you decide, with two questions. Keep the cache warm, or let it go cold? Keep the full chat, or compact it?
+Claude Code compacts idle chats only from 200k up. Below that, you come back to a cold, full chat. Token Report asks two questions:
 
 | | Keep the full chat | Compact the chat |
 |---|---|---|
-| **Let the cache go cold** | **Keep full** (default). Nothing happens. You come back to the full chat, cold. | **Compact.** Compacted once, while still warm. You come back to a small chat. |
-| **Keep the cache warm first** | **Cache Warmer, then keep full.** Warm for a set time, then it goes cold. | **Cache Warmer, then compact.** Warm for a set time, then compacted while still warm. |
+| **Let the cache go cold** | **Keep full** (default). Spends nothing. | **Compact.** Once, while still warm. |
+| **Keep the cache warm first** | **Cache Warmer, then keep full** | **Cache Warmer, then compact** |
 
-- **Keep full** spends nothing. It also refuses Claude Code's idle summary, so nothing changes your chat while you are away. If you come back cold, the dialog asks before the expensive send.
-- **Compact** fills the gap Claude Code leaves. Below its idle threshold, the mod compacts once per pause, 10 minutes before a 1-hour cache goes cold, for chats of 50k and more. The chat is still warm then, so the compaction costs a cache read and a short summary. From the threshold up, Claude Code's own summary does the job. On a 5-minute cache the mod does not compact.
-- **Cache Warmer** sends a tiny request shortly before the cache expires. It reads the chat (≈ $0.06 at 150k) and resets the clock. It runs for 1, 2 or 5 hours after your last message on a 1-hour cache, or 15, 30 or 45 minutes on a 5-minute cache. If Claude Code writes its summary meanwhile, the mod holds it back, because putting it in would throw away the warm cache you paid for. When the time is up, **then compact** compacts while still warm (with Claude Code's summary, if there is one), and **then keep full** lets the cache go cold.
-
-How this works with Claude Code's own idle compaction:
-
-| Your chat in a pause | Claude Code alone | With Token Report |
-|---|---|---|
-| Below the idle threshold (200k) | Nothing. You come back cold and full. | **Keep full**: the same, and the dialog asks first. **Compact**: the mod compacts before the cache goes cold. |
-| From the idle threshold up | Its summary goes in when you come back. | **Keep full**: the summary is refused. **Compact**: Claude Code's summary is used. **Cache Warmer, then compact**: the summary waits until the warmer ends. **Cache Warmer, then keep full**: refused. |
-
-**Which one?** On a 1-hour cache the warmer pings once an hour, and 20 pings cost about one cold send. So warming pays for a pause of a few hours, not for the night. On a 5-minute cache it pings about every 4 minutes, so 45 minutes cost about one cold send, and that is where its choices stop. Compact is the cheapest way back, at the price of detail. Keep full costs nothing and asks before anything costs.
-
-Claude Code's own switches still apply, and the mod reads them. `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` sets the idle threshold (100k at least). `"idleCompaction": false` turns Claude Code's idle compaction off. `"promptCacheTtl": "5m"` or `"1h"` sets the cache lifetime.
-
-## At the threshold
-
-The chat grows until Claude Code compacts it at its own limit. Token Report lets you act earlier. At a context size you set (400k by default), it reminds you (default), asks, or compacts, and again every further 100k. Right after a turn the cache is warm, so that is the cheap moment to compact.
-
-**/compact instructions** you add go with every compaction the mod starts and with Claude Code's idle summary.
+- **Compact** fills the gap from 50k to 200k. Above it, Claude Code's own summary does the job.
+- **Keep full** also refuses Claude Code's summary.
+- **Cache Warmer** pings before the cache expires, for 1, 2 or 5 hours. 20 pings cost about one cold send.
 
 ## Settings
 
