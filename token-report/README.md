@@ -2,47 +2,25 @@
 
 ![The Token Report band (marked) above the prompt, under a row of other mods: Context 125k, up 1k in the last turn, Cache 59m, Session about 0.69 €, 5h limit 74% with its reset in 1h 8m, Weekly 49%.](../visual-assets/token-report/band-warm.webp)
 
-<h4 align="center">What does it do?</h4>
-
-<p align="center">It shows a band above the prompt: how big the chat is and how fast it grows,<br>
-how long the cache stays warm, what the session cost and how much of your plan is left.<br>
-A Settings pane decides what happens to the cache and the chat while you are away.</p>
-
-<h4 align="center">Why?</h4>
-
-<p align="center">A long chat is cheap while its cache is warm and expensive once it goes cold.<br>
-Claude Code does not show when that happens. Token Report shows it,<br>
-asks before an expensive send and lets you choose what happens while you are away.</p>
-
-> **Desktop app only.** Token Report is a mod for the Code tab of the Claude desktop app. It was built and tested there (Claude Code 2.1.309). The terminal is untested.
-
-## Install
-
-In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `byMarcoVogt/mods`, then **Add plugin** and pick `token-report`.
-
-From a terminal session:
-
-```
-/plugin install token-report --marketplace byMarcoVogt/mods
-```
-
-Answer `y` to add the marketplace, then pick the user scope. The band shows up in the next session. `/tokens` opens the Settings pane, and so does **≣ Report** on the band.
-
-**Update:** `/plugin marketplace update bymarcovogt-mods`. **Uninstall:** `/plugin uninstall token-report`.
+| Pain point | What Token Report does |
+|---|---|
+| **Cache.** A long chat is cheap while its cache is warm and expensive once it goes cold. Claude Code does not show when that happens. | The band counts down the minutes until the cache goes cold. Before an expensive send on a cold cache, a dialog asks first. While you are away, it keeps the cache warm or compacts, as you choose. |
+| **Context.** The chat grows quietly until Claude Code compacts it at its own limit. | The band shows the chat's size and how much the last turn added. At your threshold it reminds you, asks or compacts. |
+| **Cost.** You don't see what a session costs, or how much of your plan is left. | The band shows the session's cost (at API prices on a subscription) and your 5-hour and weekly limits. |
 
 ## Real use
 
 **When the cache has gone cold, the band says what the next send costs.**
 
-![Real band (marked): Context 133k, the cache cold, the next send rewriting 133k for about 0.95 €, Session about 16.15 €, Weekly 36%.](../visual-assets/token-report/band-cold.webp)
+<img src="../visual-assets/token-report/band-cold.webp" width="720" alt="Real band (marked): Context 133k, the cache cold, the next send rewriting 133k for about 0.95 €, Session about 16.15 €, Weekly 36%.">
 
 **Before an expensive send on a cold cache, it asks.**
 
-![Real dialog (marked), in a desktop app set to German: Your chat went cold. Sending reloads all 124k (about 0.55 €). Compacting first costs about the same now, but every later message is cheaper. Choices: Send anyway, Compact, then send, Cancel. Below it the band, with the cache working.](../visual-assets/token-report/cold-dialog.webp)
+<img src="../visual-assets/token-report/cold-dialog.webp" width="440" alt="Real dialog (marked), in a desktop app set to German: Your chat went cold. Sending reloads all 124k (about 0.55 €). Compacting first costs about the same now, but every later message is cheaper. Choices: Send anyway, Compact, then send, Cancel. Below it the band, with the cache working.">
 
 **The Settings pane: what happens to the cache and the chat while you are away, and at your threshold.**
 
-![Real Settings pane: cards for Chat 260k, Cache 59m, Session about 68.19 €, Plan subscription, then the groups Plan, Money, Cache management and Context management.](../visual-assets/token-report/settings.webp)
+<img src="../visual-assets/token-report/settings.webp" width="440" alt="Real Settings pane: cards for Chat 260k, Cache 59m, Session about 68.19 €, Plan subscription, then the groups Plan, Money, Cache management and Context management.">
 
 ## The band
 
@@ -54,7 +32,11 @@ Answer `y` to add the marketplace, then pick the user scope. The band shows up i
 
 ## Settings
 
-Settings apply to **Global** (every session), **Project** (a `.token-report/settings.json` in the project folder) or **Session** (this chat only). Session beats Project, and Project beats Global.
+Settings apply to:
+
+1. **Global**: every session.
+2. **Project**: a `.token-report/settings.json` in the project folder, for everyone who opens that folder.
+3. **Session**: this chat only.
 
 ### When you're away
 
@@ -93,21 +75,21 @@ Watching costs nothing. The band reads usage that Claude Code already has and ch
 - by a compaction: **Compact** while you are away, **Compact** at the threshold, **⤓**, or **Compact, then send**
 - by Cache Warmer pings, if you choose a Cache Warmer. On a 150k chat with Opus, a ping costs about $0.06 at API prices.
 
-## Privacy
+## Install
 
-- Reads the session's usage locally.
-- Writes to the mod's own store, and to `.token-report/settings.json` only when you save a setting under Project.
-- Uses the network only for the euro rate (the ECB rate from frankfurter.app), and only when € is chosen.
-- No telemetry.
+Token Report is a mod for the Code tab of the Claude desktop app, built and tested there (Claude Code 2.1.309). The terminal is untested.
 
-A project's `.token-report/settings.json` applies to everyone who opens that folder, including a Cache Warmer or compact instructions. Look at it before you trust a repository you cloned.
+In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `byMarcoVogt/mods`, then **Add plugin** and pick `token-report`.
 
-## Known limits
+From a terminal session:
 
-- The ⓘ tooltips show on mouse hover only, not with the keyboard or on touch.
-- A dropdown in the pane can flicker while you hover over it. This comes from the desktop app.
-- **Compact, then send** sends your text again. Pasted images and files can't be sent again, so for those messages the dialog offers only **Send anyway** and **Cancel**.
-- **Use the summary** is not yet tested in a live session.
+```
+/plugin install token-report --marketplace byMarcoVogt/mods
+```
+
+Answer `y` to add the marketplace, then pick the user scope. The band shows up in the next session. `/tokens` opens the Settings pane, and so does **≣ Report** on the band.
+
+**Update:** `/plugin marketplace update bymarcovogt-mods`. **Uninstall:** `/plugin uninstall token-report`.
 
 ## License
 
