@@ -819,7 +819,7 @@ export const register: Register = on => {
     // The Report button, pinned at the band's left edge: opens and closes the pane
     const head = <ui.Button key="trn-pane" label="≣ Report" variant="primary" onPress={() => void (isOpen ? closePane($) : openPane($))} />
     const act = makeAct($)
-    const line = drawLine(ui, { d, settings, isWorking: !!e.props.isWorking, head, frame: await read($, tickA), onCompact: () => void act.compact() })
+    const line = drawLine(ui, { d, settings, isWorking: !!e.props.isWorking, head, frame: await read($, tickA), onCompact: () => void act.compact(), columns: num(e.props.bodyColumns) ? e.props.bodyColumns : undefined })
     return (theirs ? <ui.Box flexDirection="column">{line}{theirs}</ui.Box> : line) as never
   })
 

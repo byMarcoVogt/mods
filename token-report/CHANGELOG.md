@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.0 (2026-11-03)
+
+- A narrow band stays on one line: first the extras go (what the last turn added, the reset's clock time), then the labels, then Weekly. Only then do whole segments wrap, never with a bar at a line's edge.
+
 ## 1.0.0 (2026-11-03)
 
 First public release.

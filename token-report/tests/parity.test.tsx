@@ -26,7 +26,7 @@ async function draw($: any, on: any, name: string) {
     await t.complete({ usage: api(st.tokens - 8_000, 8_000, 'claude-opus-5-5') })
   }
   for (let i = 0; i < st.minutes; i++) await t.clock.advance(60_000)
-  const band = local(await t.drawn(await $.ui.mount({ plugin: 'token-report', surface: 'desktop', ...BAND } as never)))
+  const band = local(await t.drawn(await $.ui.mount({ plugin: 'token-report', surface: 'desktop', ...BAND, props: { ...BAND.props, bodyColumns: 200 } } as never)))
   const ui = await $.ui.mount({ plugin: 'token-report', surface: 'desktop', ...pane(110) } as never)
   // Text, button labels, each dropdown's value and each card's words
   const selects = (await ui.findAll({ type: 'Select' })).map((n: { props: { value?: string } }) => '<' + (n.props.value ?? '') + '>')

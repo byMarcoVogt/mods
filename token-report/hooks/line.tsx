@@ -1,5 +1,6 @@
 // The band above the prompt. Draws only; every number comes from Data (ledger + engine usage).
 //   [≣ Report]  Context: 184k (↑38k) [⤓] │ Cache: 52m │ Session: ≈ 3.82 € (↑0.21 €) │ 5h: 64% ↻ 1h 50m (14:30) │ Weekly: 81%
+// Narrow, it drops what it can spare to stay on one line:  [≣ Report]  184k [⤓] │ 52m │ ≈ 3.82 € │ 64% ↻ 1h 50m
 import type { RenderElement } from 'claude-code'
 
 import type { Settings } from '../types'
@@ -35,7 +36,9 @@ export const grown = (value: string, isDown = false) => ' (' + (isDown ? '↓' :
 // head: the Report button, pinned at the band's left edge
 export type LineInput = { d: Data; settings: Settings; isWorking: boolean; head?: RenderElement; frame?: number
   // The one action the band offers once the context reaches the threshold
-  onCompact?: () => void }
+  onCompact?: () => void
+  // The band's width in character cells (AbovePrompt's bodyColumns): past it the segments wrap by whole lines
+  columns?: number }
 
 // One colour rule: the share of a limit already used, steps at 70 % and 90 %. Session metrics
 // (Context, Cache, Session) show green when fine; long-term ones (Weekly) stay colourless until orange.
@@ -60,86 +63,132 @@ export function paceColor(percentUsed: number, leftMs: number | null): string | 
   return projected >= 110 ? C.red : projected >= 90 ? C.warn : C.ok
 }
 
+// How much the band shows. It stays on one line as long as it can: first the extras go (what the last
+// turn added, the reset's clock time, the cold price's wording), then the labels, then Weekly. Only if
+// even that does not fit do whole segments wrap onto a second line.
+const FULL = 0, NO_EXTRAS = 1, NO_LABELS = 2, NO_WEEKLY = 3
+
 export function drawLine(ui: UI, o: LineInput): RenderElement {
   const { Box, Text, Button } = ui
   const { d, settings } = o
-  const dim = (s: string, key: string) => <Text key={key} dimColor>{s}</Text>
-  const col = (s: string, color: string | null, key: string) => (color ? <Text key={key} color={color}>{s}</Text> : <Text key={key}>{s}</Text>)
-  const parts: RenderElement[][] = []
   const tokens = ctxTokens(d.usage)
   const target = d.target
 
-  // Context: size and what the last turn added, coloured against the threshold; Compact once past it
-  {
-    const p: RenderElement[] = [dim('Context: ', 'c-l')]
-    if (d.s.compacted) {
-      p.push(dim(num(d.s.compacted.after) ? '~' + k(d.s.compacted.after) + ' compacted' : 'compacted', 'c-v'))
-    } else if (tokens === null) {
-      p.push(dim('–', 'c-v'))
-    } else {
-      const growth = d.s.growth.filter(num)
-      const last = growth[growth.length - 1]
-      p.push(col(k(tokens), target ? stateColor(tokens / target, true) : C.ok, 'c-v'), dim(last !== undefined ? grown(k(Math.abs(last)), last < 0) : '', 'c-g'))
-      if (target && tokens >= target && o.onCompact && !o.isWorking && settings.atTarget !== 'off') {
-        p.push(dim('  ', 'c-gap'), <Button key="c-compact" label="⤓" variant="primary" onPress={o.onCompact} />)
+  // The segments at one level, each with its width in cells (counted as it is built)
+  const build = (level: number) => {
+    let width = 0
+    const dim = (s: string, key: string) => { width += s.length; return <Text key={key} dimColor>{s}</Text> }
+    const col = (s: string, color: string | null, key: string) => { width += s.length; return color ? <Text key={key} color={color}>{s}</Text> : <Text key={key}>{s}</Text> }
+    const label = (s: string, key: string) => (level < NO_LABELS ? [dim(s + ': ', key)] : [])
+    const parts: RenderElement[][] = []
+    const widths: number[] = []
+    const push = (p: RenderElement[]) => { parts.push(p); widths.push(width); width = 0 }
+
+    // Context: size and what the last turn added, coloured against the threshold; Compact once past it
+    {
+      const p: RenderElement[] = label('Context', 'c-l')
+      if (d.s.compacted) {
+        p.push(dim(num(d.s.compacted.after) ? '~' + k(d.s.compacted.after) + ' compacted' : 'compacted', 'c-v'))
+      } else if (tokens === null) {
+        p.push(dim('–', 'c-v'))
+      } else {
+        const growth = d.s.growth.filter(num)
+        const last = growth[growth.length - 1]
+        p.push(col(k(tokens), target ? stateColor(tokens / target, true) : C.ok, 'c-v'))
+        if (level < NO_EXTRAS && last !== undefined) p.push(dim(grown(k(Math.abs(last)), last < 0), 'c-g'))
+        if (target && tokens >= target && o.onCompact && !o.isWorking && settings.atTarget !== 'off') {
+          width += 4
+          p.push(dim('  ', 'c-gap'), <Button key="c-compact" label="⤓" variant="primary" onPress={o.onCompact} />)
+        }
       }
+      push(p)
     }
-    parts.push(p)
-  }
 
-  // Cache: the main thread's clock in its real lifetime (5 min on an API key, 60 on a plan)
-  {
-    const p: RenderElement[] = [dim('Cache: ', 'k-l')]
-    const left = d.cacheLeft
-    if (o.isWorking) {
-      // While a turn runs the cache is being refreshed: a spinner (a frame every 350 ms)
-      p.push(<Text key="w-s" color={C.ok}>{'⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[(o.frame ?? 0) % 10]! + ' working'}</Text>)
-    } else if (d.s.compacted || (left !== null && left <= 0)) {
-      const price = d.rewriteUsd !== null ? ' · next send rewrites ' + k(d.s.compacted?.after ?? tokens) + ' ' + money(d.rewriteUsd, settings, d.s.compacted ? '~' : '≈') : ''
-      p.push(col('cold' + (d.s.compacted ? ' · compacted' : '') + price, C.red, 'k-v'))
-    } else if (left === null) {
-      p.push(dim('– no request yet', 'k-v'))
-    } else {
-      p.push(col(mins(left), stateColor(1 - left / d.ttlMin, true) ?? C.ok, 'k-v'))
-    }
-    parts.push(p)
-  }
-
-  // Session: the total so far, and in brackets what the last turn added (main thread and its agents)
-  {
-    const total = sessionUsd(d.L, d.usage?.cost?.usd)
-    const p: RenderElement[] = [dim('Session: ', 'm-l'), col(money(total, settings), C.ok, 'm-v')]
-    const last = d.series[d.series.length - 1]
-    if (last) p.push(dim(grown(money(last.usd, settings, '')), 'm-t'))
-    parts.push(p)
-  }
-
-  // Plan limits: only on a subscription. "5h: 35% ↻ 1h 54m (14:30)"
-  if (d.billing.billing !== 'api') {
-    const five = limitOf(d.usage, 'five_hour'), week = limitOf(d.usage, 'seven_day')
-    if (five) {
-      const reset = resetMs(five)
-      const p: RenderElement[] = [dim('5h: ', 'f-l'), col(Math.round(five.percentUsed) + '%', paceColor(five.percentUsed, reset === null ? null : Math.max(0, reset - d.now)), 'f-v')]
-      if (reset !== null) {
-        const left = Math.max(0, reset - d.now)
-        const at = new Date(reset).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
-        p.push(dim(' ↻ ' + mins(left / 60_000) + ' (' + at + ')', 'f-r'))
+    // Cache: the main thread's clock in its real lifetime (5 min on an API key, 60 on a plan)
+    {
+      const p: RenderElement[] = label('Cache', 'k-l')
+      const left = d.cacheLeft
+      if (o.isWorking) {
+        // While a turn runs the cache is being refreshed: a spinner (a frame every 350 ms)
+        p.push(col('⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[(o.frame ?? 0) % 10]! + ' working', C.ok, 'w-s'))
+      } else if (d.s.compacted || (left !== null && left <= 0)) {
+        const mark = d.s.compacted ? '~' : '≈'
+        const price = d.rewriteUsd === null ? ''
+          : level < NO_EXTRAS ? ' · next send rewrites ' + k(d.s.compacted?.after ?? tokens) + ' ' + money(d.rewriteUsd, settings, mark)
+          : ' ' + money(d.rewriteUsd, settings, mark)
+        p.push(col('cold' + (d.s.compacted && level < NO_EXTRAS ? ' · compacted' : '') + price, C.red, 'k-v'))
+      } else if (left === null) {
+        p.push(dim(level < NO_EXTRAS ? '– no request yet' : '–', 'k-v'))
+      } else {
+        p.push(col(mins(left), stateColor(1 - left / d.ttlMin, true) ?? C.ok, 'k-v'))
       }
-      parts.push(p)
+      push(p)
     }
-    if (week) parts.push([dim('Weekly: ', 'w-l'), col(Math.round(week.percentUsed) + '%', stateColor(week.percentUsed / 100, false), 'w-v')])
+
+    // Session: the total so far, and in brackets what the last turn added (main thread and its agents)
+    {
+      const total = sessionUsd(d.L, d.usage?.cost?.usd)
+      const p: RenderElement[] = [...label('Session', 'm-l'), col(money(total, settings), C.ok, 'm-v')]
+      const last = d.series[d.series.length - 1]
+      if (last && level < NO_EXTRAS) p.push(dim(grown(money(last.usd, settings, '')), 'm-t'))
+      push(p)
+    }
+
+    // Plan limits: only on a subscription. "5h: 35% ↻ 1h 54m (14:30)"
+    if (d.billing.billing !== 'api') {
+      const five = limitOf(d.usage, 'five_hour'), week = limitOf(d.usage, 'seven_day')
+      if (five) {
+        const reset = resetMs(five)
+        const p: RenderElement[] = [...label('5h', 'f-l'), col(Math.round(five.percentUsed) + '%', paceColor(five.percentUsed, reset === null ? null : Math.max(0, reset - d.now)), 'f-v')]
+        if (reset !== null) {
+          const left = Math.max(0, reset - d.now)
+          const at = new Date(reset).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
+          p.push(dim(' ↻ ' + mins(left / 60_000) + (level < NO_EXTRAS ? ' (' + at + ')' : ''), 'f-r'))
+        }
+        push(p)
+      }
+      if (week && level < NO_WEEKLY) push([...label('Weekly', 'w-l'), col(Math.round(week.percentUsed) + '%', stateColor(week.percentUsed / 100, false), 'w-v')])
+    }
+    return { parts, widths }
   }
 
-  // Each segment is one box with equal space around it; thin bars between
-  const run: RenderElement[] = []
-  parts.forEach((p, i) => {
-    if (i) run.push(dim(' │ ', 'sep-' + i))
-    run.push(<Box key={'seg-' + i} flexDirection="row">{p}</Box>)
+  // The Report button, its gap and the frame take about 16 cells
+  const SEP = ' │ '
+  const room = (o.columns ?? Infinity) - 16
+  const oneLine = (w: number[]) => w.reduce((a, b) => a + b, 0) + SEP.length * Math.max(0, w.length - 1)
+  let level = FULL
+  let built = build(level)
+  while (level < NO_WEEKLY && oneLine(built.widths) > room) built = build(++level)
+  const { parts, widths } = built
+
+  // Still too wide: whole segments wrap by line, the bars only between segments of one line
+  const lines: number[][] = []
+  let used = 0
+  widths.forEach((w, i) => {
+    const line = lines[lines.length - 1]
+    if (line && used + SEP.length + w <= room) {
+      line.push(i)
+      used += SEP.length + w
+    } else {
+      lines.push([i])
+      used = w
+    }
   })
-  const body = <Box key="body" flexDirection="row" flexWrap="wrap" alignItems="center" flexGrow={1} justifyContent="space-evenly">{run}</Box>
+  const row = (idx: number[], n: number) => {
+    const run: RenderElement[] = []
+    idx.forEach((i, j) => {
+      if (j) run.push(<Text key={'sep-' + i} dimColor>{SEP}</Text>)
+      run.push(<Box key={'seg-' + i} flexDirection="row">{parts[i]}</Box>)
+    })
+    // One line: equal space around the segments. Several: each line starts at the left edge
+    return <Box key={'line-' + n} flexDirection="row" alignItems="center" justifyContent={lines.length > 1 ? 'flex-start' : 'space-evenly'} flexGrow={1}>{run}</Box>
+  }
+  const body = lines.length > 1
+    ? <Box key="body" flexDirection="column" flexGrow={1}>{lines.map(row)}</Box>
+    : row(lines[0] ?? [], 0)
   return (
     <Box flexDirection="row" alignItems="center" borderStyle="round" borderDimColor paddingX={1}>
-      {o.head ? [o.head, dim(' ', 'head-gap'), body] : [body]}
+      {o.head ? [o.head, <Text key="head-gap"> </Text>, body] : [body]}
     </Box>
   )
 }
