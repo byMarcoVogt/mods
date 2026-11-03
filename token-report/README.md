@@ -59,10 +59,6 @@ Claude Code compacts idle chats only from 200k up. Below that, you come back to 
 
 <img src="../visual-assets/token-report/settings.webp" width="720" alt="The Settings pane with a note beside each row. Where settings apply: Global, Project or Session. Choose your plan: Subscription or API key. Currency: measure in US dollars or euros. What happens while you are away? It can ask before an expensive send. Choose your preferred context size. What should it do there? Add instructions for every compaction.">
 
-## What it costs
-
-Watching costs nothing. The band reads usage that Claude Code already has and changes nothing Claude reads. Out of the box the mod spends no tokens. Tokens go only to what you choose: a compaction (while you are away, at the threshold, ⤓, or Compact, then send) and Cache Warmer pings.
-
 ## Install
 
 Token Report is a mod for the Code tab of the Claude desktop app, built and tested there (Claude Code 2.1.309). The terminal is untested.
