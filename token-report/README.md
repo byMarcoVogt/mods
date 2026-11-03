@@ -55,26 +55,9 @@ Claude Code compacts idle chats only from 200k up. Below that, you come back to 
 
 ## Settings
 
-**≣ Report** on the band, or `/tokens`, opens the Settings pane. Four cards on top show the chat's size, the cache, the session's cost and your plan.
+**≣ Report** on the band, or `/tokens`, opens the Settings pane:
 
-<img src="../visual-assets/token-report/settings.webp" width="440" alt="The Settings pane: cards for Chat 260k, Cache 59m, Session about 68.19 €, Plan subscription, then the groups Plan, Money, Cache management and Context management.">
-
-Changes apply to:
-
-1. **Global**: every session.
-2. **Project**: a `.token-report/settings.json` in the project folder, for everyone who opens that folder.
-3. **Session**: this chat only.
-
-| Setting | Choices | Default |
-|---|---|---|
-| Plan type | Detect automatically, Subscription, API key | Detect |
-| Currency | $, € (ECB rate) | $ |
-| When you're away | Keep full, Compact, Cache Warmer then compact, Cache Warmer then keep full | Keep full |
-| Cache Warmer for | 1, 2 or 5 hours (15, 30 or 45 minutes on a 5-minute cache) | 1 hour |
-| Ask before a cold send | Never, Above 0.25, Above 0.50, Above 1.00, Always | Above 0.50 |
-| Threshold | 200k, 300k, 400k, 600k, Max, Custom (50k at least) | 400k |
-| At the threshold | Off, Reminder, Ask, Compact | Reminder |
-| /compact | No added instructions, Added instructions | None |
+<img src="../visual-assets/token-report/settings.webp" width="720" alt="The Settings pane with a note beside each row. Where settings apply: Global, Project or Session. Choose your plan: Subscription or API key. Currency: measure in US dollars or euros. What happens while you are away? It can ask before an expensive send. Choose your preferred context size. What should it do there? Add instructions for every compaction.">
 
 ## What it costs
 
