@@ -8,20 +8,6 @@
 | **Context.** The chat grows quietly until Claude Code compacts it at its own limit. | The band shows the chat's size and how much the last turn added. At your threshold it reminds you, asks or compacts. |
 | **Cost.** You don't see what a session costs, or how much of your plan is left. | The band shows the session's cost (at API prices on a subscription) and your 5-hour and weekly limits. |
 
-## Real use
-
-**When the cache has gone cold, the band says what the next send costs.**
-
-<img src="../visual-assets/token-report/band-cold.webp" width="720" alt="Real band (marked): Context 133k, the cache cold, the next send rewriting 133k for about 0.95 €, Session about 16.15 €, Weekly 36%.">
-
-**Before an expensive send on a cold cache, it asks.**
-
-<img src="../visual-assets/token-report/cold-dialog.webp" width="440" alt="Real dialog (marked), in a desktop app set to German: Your chat went cold. Sending reloads all 124k (about 0.55 €). Compacting first costs about the same now, but every later message is cheaper. Choices: Send anyway, Compact, then send, Cancel. Below it the band, with the cache working.">
-
-**The Settings pane: what happens to the cache and the chat while you are away, and at your threshold.**
-
-<img src="../visual-assets/token-report/settings.webp" width="440" alt="Real Settings pane: cards for Chat 260k, Cache 59m, Session about 68.19 €, Plan subscription, then the groups Plan, Money, Cache management and Context management.">
-
 ## The band
 
 - **Context** in tokens, with the growth of the last turn. It turns orange and then red as it nears your threshold.
@@ -30,7 +16,15 @@
 - **Plan limits** (5 hours and weekly) with their reset time, on a subscription.
 - **⤓** compacts the chat now, while the cache is warm.
 
+Once the cache has gone cold, the band says what the next send costs:
+
+<img src="../visual-assets/token-report/band-cold.webp" width="720" alt="The band (marked): Context 133k, the cache cold, the next send rewriting 133k for about 0.95 €, Session about 16.15 €, Weekly 36%.">
+
 ## Settings
+
+**≣ Report** on the band, or `/tokens`, opens the Settings pane. The four cards on top show the chat's size, the cache, the session's cost and your plan. Below them, the settings in four groups: Plan, Money, Cache management and Context management.
+
+<img src="../visual-assets/token-report/settings.webp" width="440" alt="The Settings pane: cards for Chat 260k, Cache 59m, Session about 68.19 €, Plan subscription, then the groups Plan, Money, Cache management and Context management.">
 
 Settings apply to:
 
@@ -63,6 +57,9 @@ Two questions, four choices:
 | /compact | No added instructions, Added instructions | None |
 
 - **Ask before a cold send.** If the cache has gone cold and your message would cost more than the amount you set, a dialog asks first. Its choices are **Send anyway**, **Compact, then send** (your message goes again on the small chat), or **Cancel**. Closing the dialog cancels. If Claude Code already wrote an idle summary, the middle choice is **Use the summary**.
+
+  <img src="../visual-assets/token-report/cold-dialog.webp" width="400" alt="The cold-send dialog, in a desktop app set to German: Your chat went cold. Sending reloads all 124k (about 0.55 €). Compacting first costs about the same now, but every later message is cheaper. Choices: Send anyway, Compact, then send, Cancel.">
+
 - **At the threshold.** The Reminder and Ask come back every further 100k.
 - **/compact instructions** go with every compaction the mod starts and with Claude Code's idle summary.
 
