@@ -7,21 +7,16 @@
 <p align="center">It shows above the prompt what your chat costs and when its cache goes cold,<br>
 and it decides what happens to the chat while you are away.</p>
 
-<h4 align="center">Why?</h4>
-
-<p align="center">A coffee break can turn a $0.06 message into a $1.20 one,<br>
-and Claude Code does not tell you.</p>
-
 ## Why a pause costs money
 
-Every message sends the whole chat again. While the prompt cache is warm, that is a cache read, a tenth of the input price. Once the cache has gone cold, the next message writes the whole chat into the cache again, at twice the input price on a 1-hour cache.
+Every message sends the whole chat again. Once the cache has gone cold, all of it is written into the cache again:
 
 | A 150k chat on Opus 5.5 | Your next message costs |
 |---|---|
 | Cache warm | ≈ $0.06 |
 | Cache cold | ≈ $1.20, 20 times as much |
 
-The cache lives 1 hour on a subscription and 5 minutes with an API key. On a subscription nothing is billed per message, so you never see the jump. It counts against your plan limits instead. Token Report shows every amount at API prices.
+The cache lives 1 hour on a subscription and 5 minutes with an API key. Claude Code does not show when it goes cold.
 
 ## The band
 
