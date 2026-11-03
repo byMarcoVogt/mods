@@ -2,10 +2,10 @@
 
 ![The Token Report band (marked) above the prompt, under a row of other mods: Context 125k, up 1k in the last turn, Cache 59m, Session about 0.69 €, 5h limit 74% with its reset in 1h 8m, Weekly 49%.](../visual-assets/token-report/band-warm.webp)
 
-<h4 align="center">What does it do?</h4>
+<h3 align="center">Long chats stay cheap, even after a break.</h3>
 
-<p align="center">It shows above the prompt what your chat costs and when its cache goes cold,<br>
-and it decides what happens to the chat while you are away.</p>
+<p align="center">Token Report shows when your chat's cache goes cold, asks before an expensive send,<br>
+and keeps the cache warm or compacts while you are away.</p>
 
 ## Why a pause costs money
 
