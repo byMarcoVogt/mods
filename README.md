@@ -10,13 +10,16 @@ Mods I built for the Code tab of the Claude desktop app. A mod is a plugin that 
 
 ## Install
 
-In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `byMarcoVogt/mods`, then **Add plugin**.
+In the desktop app: click **+** next to the prompt box, then **Plugins**. **Add marketplace** `byMarcoVogt/mods`, then **Add plugin** `token-report`.
 
-From a terminal session:
+From a terminal, no questions asked (also for agents):
 
+```bash
+claude plugin marketplace add byMarcoVogt/mods
+claude plugin install token-report@bymarcovogt-mods
 ```
-/plugin install token-report --marketplace byMarcoVogt/mods
-```
+
+`claude plugin list` then shows token-report as enabled.
 
 ## License
 

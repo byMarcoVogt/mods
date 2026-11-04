@@ -2,8 +2,19 @@
   "name": "token-report",
   "version": "1.1.0",
   "description": "A band above the prompt with context size, cache clock, session cost and plan limits, plus a Settings pane for what happens to the cache and the context while you are away. For the Claude desktop app's Code tab.",
-  "author": { "name": "Marco Vogt" },
+  "author": {
+    "name": "Marco Vogt"
+  },
   "license": "MIT",
   "repository": "https://github.com/byMarcoVogt/mods",
+  "homepage": "https://github.com/byMarcoVogt/mods/tree/main/token-report",
+  "keywords": [
+    "claude-code",
+    "mod",
+    "prompt-caching",
+    "cost",
+    "tokens",
+    "context"
+  ],
   "types": "./types/index.d.ts"
 }
