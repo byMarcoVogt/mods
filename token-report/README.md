@@ -15,7 +15,7 @@ Every message sends the whole chat again. Once the cache has gone cold, all of i
 | A 150k chat on Opus 5.5 | Your next message costs |
 |---|---|
 | Cache warm | ≈ $0.06 |
-| Cache cold | ≈ $1.20, 20 times as much |
+| Cache cold | ≈ $1.20 |
 
 The cache lives 1 hour on a subscription and 5 minutes with an API key. Claude Code does not show when it goes cold.
 
