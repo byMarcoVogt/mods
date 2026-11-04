@@ -4,8 +4,9 @@
 
 <h3 align="center">Long chats stay cheap, even after a break.</h3>
 
-<p align="center">Token Report shows when your chat's cache goes cold, asks before an expensive send,<br>
-and keeps the cache warm or compacts while you are away.</p>
+<p align="center">An add-on for the Claude desktop app. It makes clear what drives the cost of a session<br>
+(context size, prompt cache, model), helps keep that cost low, and warns you<br>
+before an expensive step (a send to a cold cache).</p>
 
 ## Why a pause costs money
 
@@ -59,6 +60,13 @@ Claude Code compacts idle chats only from 200k up. Below that, you come back to 
 
 <img src="../visual-assets/token-report/settings.webp" width="720" alt="The Settings pane with a note beside each row. Where settings apply: Global, Project or Session. Choose your plan: Subscription or API key. Currency: measure in US dollars or euros. What happens while you are away? It can ask before an expensive send. Choose your preferred context size. What should it do there? Add instructions for every compaction.">
 
+## What it touches
+
+- **Hooks:** prompt submit, turns, compaction, model switch and session start and end. It reads token usage from Claude Code on your machine; nothing is sent anywhere.
+- **Network:** only with € chosen, at most twice a day, one call to api.frankfurter.app for the ECB dollar-to-euro rate. No telemetry.
+- **Tokens:** out of the box it spends none. The Cache Warmer, if you switch it on, sends short pings that read the whole chat at the cache price, and compacting writes a summary like any compaction.
+- **Files:** Settings for Project scope go into `.token-report/settings.json` in your project folder. Global and Session settings stay in Claude Code's own plugin storage.
+
 ## Install
 
 **In the Claude desktop app** (Code tab):
@@ -67,18 +75,29 @@ Claude Code compacts idle chats only from 200k up. Below that, you come back to 
 2. **Add marketplace**: `byMarcoVogt/mods`
 3. **Add plugin**: `token-report`
 
-**In a terminal session:**
+**From a terminal, no questions asked** (also for agents):
 
+```bash
+claude plugin marketplace add byMarcoVogt/mods
+claude plugin install token-report@bymarcovogt-mods
 ```
-/plugin install token-report --marketplace byMarcoVogt/mods
-```
 
-The band shows up in your next session.
+`claude plugin list` then shows token-report as enabled. The band shows up in your next session.
 
-- **Update:** `/plugin marketplace update bymarcovogt-mods`
-- **Uninstall:** `/plugin uninstall token-report`
+- **Update:** `claude plugin marketplace update bymarcovogt-mods`, then `claude plugin update token-report@bymarcovogt-mods`
+- **Uninstall:** `claude plugin uninstall token-report@bymarcovogt-mods`
 
 Built and tested in the desktop app (Claude Code 2.1.309). The terminal is untested.
+
+## Development
+
+```bash
+git clone https://github.com/byMarcoVogt/mods
+claude plugin test mods/token-report
+claude plugin validate mods/token-report
+```
+
+The type files in `.claude-plugin/types/` are not in the repo. Claude Code writes them when it loads the mod from a folder it watches (`--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS`). After that, `tsc --project mods/token-report` type-checks it.
 
 ## License
 
