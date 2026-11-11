@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 (2026-11-10)
+
+New in v2: agent and session starts. Settings gain a section, Agents and side sessions, with two rows for Global, Project or Session. Both default to **Count only**: starts go ahead as asked and are counted.
+
+- **Agent starts → Hand back:** a research or gathering agent that would inherit an Opus or Fable model from its parent is sent back once, with the reason, to name a cheaper model. A call that names a model always starts; one that names an expensive model on purpose gets one note per session. Workflow, resume, teammate and fork starts are only counted.
+- **Session starts → Hand back:** a fork of a large chat (carrying it over would cost $0.25 or more, or the chat's cache is cold) is sent back once to start fresh, and a fresh start with no model from an Opus or Fable chat to name one. A repeated request passes.
+- A hand-back is a refusal the calling model reads, never a window or a pop-up.
+- Event log: `agent_start`, `hand_back`, `hand_back_answer`, `agent_end` (tokens and tool counts) and `side_start`.
+
 ## 1.3.1 (2026-11-10)
 
 - List prices now live in `prices.json`, checked against Anthropic's pricing page on 2026-11-10. `hooks/prices.ts` is generated from it: edit the JSON, then run `node gen-prices.mjs` in the mod folder (`--check` says whether the generated file is stale).

@@ -14,6 +14,13 @@ export type Settings = {
   // count: behave as on any turn but never a dialog, and log what act would have done · act: compact
   // after such a turn above the threshold, and compact before one that wakes a cold cache
   unattended: 'count' | 'act'
+  // Agent starts (v2 slice 2). count: start as asked, log what act would do · act: a research or
+  // gathering agent that would inherit Opus or Fable is handed back once to name a model; one that names
+  // an expensive model starts with one note per session
+  agentStarts: 'count' | 'act'
+  // Session starts (start_session, hand_off_to_session). count: as asked, logged · act: a fork of a large
+  // chat is handed back to start fresh; a fresh start with no model from Opus or Fable to name one
+  sessionStarts: 'count' | 'act'
   // Cache management, while you are away: two by two. Cache Warmer or not, then compact or keep the full
   // chat. Compact: under Claude Code's idle compaction threshold the mod compacts shortly before the cache
   // goes cold; from it on, Claude Code's own idle compaction does. Keep full: neither compacts (Claude

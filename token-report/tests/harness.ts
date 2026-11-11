@@ -16,7 +16,7 @@ export const api = (cr: number, cw: number, model: string, input = 2, output = 3
 export function setup($: any, on: any, start = 1_000_000) {
   const clock = mock.clock(on, { now: start })
   const store: Record<string, unknown> = {}
-  const env = { tokens: 180_000 as number | undefined, cost: 1, opened: [] as string[], toasts: [] as string[], limits: undefined as unknown[] | undefined }
+  const env = { tokens: 180_000 as number | undefined, cost: 1, opened: [] as string[], toasts: [] as string[], limits: undefined as unknown[] | undefined, spawn: undefined as ((e: any) => unknown) | undefined }
   on('store.get', async (_$: unknown, e: { key: string }) => ({ value: store[e.key] }))
   on('store.set', async (_$: unknown, e: { key: string; value: unknown }) => { store[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
   on('store.delete', async (_$: unknown, e: { key: string }) => { delete store[e.key]; return { value: undefined } })
@@ -44,7 +44,8 @@ export function setup($: any, on: any, start = 1_000_000) {
   })
   on('tool.call', async () => ({ result: 'done' }))
   let spawnId = 0
-  on('agent.spawn', async () => ({ model: 'claude-haiku-5-5', agentId: 'ag' + ++spawnId }))
+  // A test's own core answer for agent starts (env.spawn), else Haiku
+  on('agent.spawn', async (_$: unknown, e: unknown) => (env.spawn ? env.spawn(e) : { model: 'claude-haiku-5-5', agentId: 'ag' + ++spawnId }) as never)
 
   const step = async (input: Record<string, unknown>, u: unknown, tools: string[] = []) => {
     stepUsage = u; stepTools = tools

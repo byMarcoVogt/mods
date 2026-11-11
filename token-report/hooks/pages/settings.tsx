@@ -218,6 +218,32 @@ export function drawSettings(ctx: PageCtx): RenderElement {
         },
       ],
     },
+    {
+      id: 'starts',
+      title: 'Agents and side sessions',
+      rows: [
+        {
+          id: 'agentStarts', label: 'Agent starts',
+          choice: { key: 'agentStarts', choices: [opt('count', 'Count only'), opt('act', 'Hand back')] },
+          info: {
+            lines: [
+              ['Count only', 'Agents start as asked and are counted.'],
+              ['Hand back', 'A research agent that would inherit Opus or Fable is sent back once to name a model. One that names an expensive model starts, with one note per session. A call that names a model always starts.'],
+            ],
+          },
+        },
+        {
+          id: 'sessionStarts', label: 'Session starts',
+          choice: { key: 'sessionStarts', choices: [opt('count', 'Count only'), opt('act', 'Hand back')] },
+          info: {
+            lines: [
+              ['Count only', 'New sessions start as asked and are counted.'],
+              ['Hand back', 'A new session with no model named from an Opus or Fable chat, or a fork of a large chat, is sent back once to name a model or start fresh. A call that names a model always passes.'],
+            ],
+          },
+        },
+      ],
+    },
   ]
 
   // ---- pieces ------------------------------------------------------------------------------
