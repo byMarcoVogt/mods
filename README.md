@@ -4,7 +4,7 @@ Mods I built for the Code tab of the Claude desktop app. A mod is a plugin that 
 
 | Mod | What it does |
 |---|---|
-| [Token Report](token-report) | Shows context, cache and cost above the prompt, and decides what happens to the cache and the chat while you are away. |
+| [Token Report](token-report) | Shows context, cache and cost above the prompt, and decides what happens to the cache and the chat while you are away. New in v2: what agents and the sessions you start cost. |
 
 > **Desktop app only.** The mods are built and tested in the desktop app's Code tab. The terminal is untested.
 
