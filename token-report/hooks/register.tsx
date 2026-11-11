@@ -10,16 +10,18 @@ import { eventsIdle, isEventLogOn, limitRows, logEvent, planOf, startEventLog, u
 import { C, k, money, num, type Act, type Data, type PageCtx, type UI } from './kit'
 import {
   addRequest, clockLeft, detectBilling, mainTtlMin, newLedger, noteAgentEnd, noteAgentStart,
-  priceFor, promptOf, restore, rewriteUsd, snapshot, toUsage, EUR_PER_USD,
+  priceFor, promptOf, restore, rewriteUsd, sessionUsd, snapshot, toUsage, EUR_PER_USD,
 } from './ledger'
 import type { Ledger, Ttl, Usage } from './ledger'
 import {
   amountMatters, answerOf, classifyStart, forkCarryUsd, forkGuardFires, handBackAgent, handBackFork, handBackModel,
-  isExpensive, jobKey, noteExplicit, ratioTo, roundTripUsd, samePrice, savingUsd, startResult, toolKind, SUGGESTED,
+  isExpensive, jobKey, noteExplicit, ratioTo, roundTripUsd, samePrice, savingUsd, startResult, SUGGESTED,
   type Answer, type Cls, type Signal,
 } from './router'
 import { ctxTokens, drawLine, warnMinutes, type LineState, type UsageView } from './line'
 import { drawShell } from './shell'
+import { asRecord, buildTree, ownRecord, MAX_SIDES, SIDE_KEY, type Side, type SideRec } from './agents'
+import { mergeLayers, profileView, withProfile, type Profile } from './profile'
 
 const PANE = 'token-report'
 const PANE_TITLE = 'Token Report'
@@ -27,7 +29,7 @@ const SUB_TTL_MIN = 5
 const DAY = 86_400_000
 
 export const DEFAULT_SETTINGS: Settings = {
-  billing: 'auto', contextTarget: 400_000, atTarget: 'remind', unattended: 'count',
+  billing: 'auto', profile: 'auto', contextTarget: 400_000, atTarget: 'remind', unattended: 'count',
   agentStarts: 'count', sessionStarts: 'count',
   away: 'keep', keepWarm: '1h', compactNote: '', coldAsk: '0.5',
   currency: 'usd', eurRate: EUR_PER_USD,
@@ -35,6 +37,7 @@ export const DEFAULT_SETTINGS: Settings = {
 // The values each setting may take: a stored or folder value outside them falls back to the default
 const ALLOWED: { [K in keyof Settings]?: readonly string[] } = {
   billing: ['auto', 'subscription', 'api'],
+  profile: ['auto', 'managed'],
   atTarget: ['off', 'remind', 'ask', 'compact'],
   unattended: ['count', 'act'],
   agentStarts: ['count', 'act'],
@@ -78,20 +81,33 @@ function validSettings(saved: unknown): Partial<Settings> {
   }
   return out as Partial<Settings>
 }
-// Defaults < Global < Project < Session, the live € rate over any stored one
+// Defaults < Global < Project < Session, each with its profile expanded (a key set by hand in a scope
+// beats that scope's profile; a profile beats everything below it), the live € rate over any stored one
 const effectiveSettings = (): Settings => ({
-  ...DEFAULT_SETTINGS, ...globalSettings, ...localSettings, ...chatSettings,
+  ...(mergeLayers([DEFAULT_SETTINGS, globalSettings, localSettings, chatSettings]) as Settings),
   ...(fx.isLive ? { eurRate: fx.rate } : {}),
 })
+const profileNow = (settings: Settings) => profileView([
+  { scope: 'default', values: {} }, { scope: 'global', values: globalSettings }, { scope: 'project', values: localSettings }, { scope: 'session', values: chatSettings },
+], settings)
 // Read one scope's file or record afresh: another session may have changed it since
 async function readProject($: EngineInterface, dir: string) {
   return validSettings(JSON.parse(await $.fs.read(dir + '/.token-report/settings.json')))
 }
 
 // ---- module state (rebuilt from $.store on a hot reload) ------------------------------------------
-type Extra = Pick<Data, 'series'>
+// This session as the desktop app names it, and the session that started it ('' when none)
+type SelfRec = { local: string; parent: string; detached: boolean; title: string }
+type Extra = Pick<Data, 'series'> & { sides: Side[]; self: SelfRec | null }
 const freshLine = (): LineState => ({ growth: [], lastCtx: null, hit: null, turns: 0, compactions: 0, compacted: null })
-const freshExtra = (): Extra => ({ series: [] })
+const freshExtra = (): Extra => ({ series: [], sides: [], self: null })
+// The started sessions' own records (store `side:<local id>`), read back for the Agents page's layers
+let records: Record<string, SideRec> = {}
+let recordsSig = ''
+// get_session("self") asked in this session already (once)
+let isSelfAsked = false
+// The pane is open (a copy of uiA's isOpen the 15 s tick reads without a state call)
+let isPaneOpen = false
 let sid = 'session'
 let L: Ledger = newLedger(sid, 0, null)
 let s: LineState = freshLine()
@@ -329,6 +345,9 @@ async function openSession($: EngineInterface, id: string, now: number) {
     effortOf.clear()
     typeModel = {}
     mainModel = ''
+    records = {}
+    recordsSig = ''
+    isSelfAsked = false
   }
   const ls = (await $.store.get('session:' + sid)) as LineState | undefined
   s = ls && Array.isArray(ls.growth) ? { ...freshLine(), ...ls } : freshLine()
@@ -336,7 +355,11 @@ async function openSession($: EngineInterface, id: string, now: number) {
   const engine = usage && usage.cost && num(usage.cost.usd) ? usage.cost.usd : null
   L = restore(saved && saved.ledger) || newLedger(sid, now, engine)
   const ex = (await $.store.get('extra:' + sid)) as (Extra & { lastPromptAt?: unknown; precomputedAt?: unknown; limitSeen?: unknown; isStartLogged?: unknown }) | undefined
-  x = ex && Array.isArray(ex.series) ? { ...freshExtra(), series: ex.series } : freshExtra()
+  x = ex && Array.isArray(ex.series) ? {
+    ...freshExtra(), series: ex.series, sides: Array.isArray(ex.sides) ? ex.sides : [],
+    self: ex.self && typeof ex.self === 'object' && typeof (ex.self as SelfRec).local === 'string' ? ex.self as SelfRec : null,
+  } : freshExtra()
+  if (x.self) isSelfAsked = true
   lastPromptAt = num(ex?.lastPromptAt) ? ex.lastPromptAt : 0
   precomputedAt = num(ex?.precomputedAt) ? ex.precomputedAt : 0
   limitSeen = ex?.limitSeen && typeof ex.limitSeen === 'object' ? { ...(ex.limitSeen as Record<string, string>) } : {}
@@ -399,7 +422,9 @@ async function prune($: EngineInterface, now: number) {
       return !num(v?.at) || now - v.at > 3 * DAY
     }
     for (const key of await $.store.keys()) {
-      if (!/^(session|ledger|extra|chat):/.test(key) || key.endsWith(':' + sid)) continue
+      if (!/^(session|ledger|extra|chat|side):/.test(key) || key.endsWith(':' + sid)) continue
+      // This session's own record is written again each turn
+      if (x.self && key === SIDE_KEY + x.self.local) continue
       // A chat's Session settings stay while that chat is used, however long ago they were set
       if (key.startsWith('chat:') && !(await isOld('session:' + key.slice(5)))) continue
       if (await isOld(key)) await $.store.delete(key)
@@ -430,7 +455,42 @@ async function snapshotData($: EngineInterface): Promise<Data> {
     rewriteUsd: num(sizeForCold) ? rewriteUsd(sizeForCold, model, ttlMin >= 60 ? '1h' : '5m') : null,
     pingUsd: num(tokens) ? (tokens * p.cacheRead + 60 * p.output) / 1e6 : null,
     series: x.series, fx,
+    profile: profileNow(settings),
+    tree: buildTree(x.self?.local || '', Object.values(L.agents), x.sides, records),
+    hasProject: !!(projectDir || cwd),
   }
+}
+
+// ---- the layers below this session (v2 slice 3) ---------------------------------------------------------
+// Off: no session writes or reads a `side:` record, and the Agents page shows this session's own agents
+// and its started sessions without money. Assumed, not shown live: two sessions writing the store in the
+// same second lose no key (live check L3 in plan/v2-slice3-agents.md)
+const LAYERS = true
+// Every started session writes its own flat record; the reader links them by parent. Only while this
+// session has a parent (it is someone's side session): a top session writes nothing.
+async function writeOwnRecord($: EngineInterface, now: number) {
+  const me = x.self
+  if (!LAYERS || !me || !me.local || !me.parent) return
+  try {
+    await $.store.set(SIDE_KEY + me.local, ownRecord(L, sessionUsd(L, usage?.cost?.usd), me, x.sides, now))
+  } catch {}
+}
+// Every record in the store (one file per machine); kept only when one changed, so the page redraws then
+async function readRecords($: EngineInterface): Promise<boolean> {
+  if (!LAYERS) return false
+  try {
+    const next: Record<string, SideRec> = {}
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(SIDE_KEY)) continue
+      const rec = asRecord(await $.store.get(key))
+      if (rec) next[key.slice(SIDE_KEY.length)] = rec
+    }
+    const sig = JSON.stringify(next)
+    if (sig === recordsSig) return false
+    records = next
+    recordsSig = sig
+    return true
+  } catch { return false }
 }
 
 function toastOnce($: EngineInterface, id: string, text: string) {
@@ -709,6 +769,7 @@ async function wakeAt($: EngineInterface, origin: string, hasAttachments: boolea
 // Is this session a child another session started and still holds (not detached)? Asked through the
 // desktop app's own tool; denied, failed or not there (the terminal): no, origins alone decide
 async function isHeldChild($: EngineInterface) {
+  isSelfAsked = true
   try {
     const r = (await $.tool.call({ tool: 'mcp__ccd_session_mgmt__get_session', session_id: 'self' } as never)) as { deny?: unknown; isError?: unknown; result?: unknown; text?: unknown } | null
     if (!r || typeof r !== 'object' || r.deny || r.isError) return false
@@ -725,7 +786,13 @@ async function isHeldChild($: EngineInterface) {
     for (const v of [r.result, r.text]) {
       try {
         const rec = find(typeof v === 'string' ? JSON.parse(v) : v, 0)
-        if (rec) return typeof rec.parentSessionId === 'string' && rec.parentSessionId !== '' && rec.detached === false
+        if (rec) {
+          const parent = typeof rec.parentSessionId === 'string' ? rec.parentSessionId : ''
+          if (typeof rec.sessionId === 'string' && rec.sessionId.startsWith('local_')) {
+            x.self = { local: rec.sessionId, parent, detached: rec.detached !== false, title: typeof rec.title === 'string' ? rec.title.slice(0, 80) : '' }
+          }
+          return parent !== '' && rec.detached === false
+        }
       } catch { /* not JSON: try the other field */ }
     }
   } catch {}
@@ -787,6 +854,35 @@ async function cacheTick($: EngineInterface) {
   if (left > 0 && left <= warnMinutes(d.ttlMin) && !warming) toastOnce($, 'cache-' + L.main.lastRequestAt, 'Cache: ' + Math.max(1, Math.ceil(left)) + 'm')
 }
 
+// One scope's settings rewritten. Each write starts from what is stored now, so another session's change
+// to another key stays. A write that fails changes nothing and says so.
+async function writeScope($: EngineInterface, scope: string, change: (prev: Partial<Settings>) => Partial<Settings>): Promise<boolean> {
+  try {
+    if (scope === 'project') {
+      const dir = projectDir || cwd
+      if (!dir) throw new Error('this session has no folder')
+      const next = change(await readProject($, dir).catch(() => ({})))
+      await $.fs.write(dir + '/.token-report/settings.json', JSON.stringify(next, null, 2) + '\n')
+      localSettings = next
+      projectDir = dir
+    } else if (scope === 'session') {
+      const next = change(chatSettings)
+      await $.store.set('chat:' + sid, { ...next, at: await $.clock.now() })
+      chatSettings = next
+    } else {
+      const next = change(validSettings(await $.store.get('settings')))
+      await $.store.set('settings', next)
+      globalSettings = next
+    }
+  } catch (err) {
+    $.ui.toast('Token Report: the setting was not saved (' + String(err) + ')')
+    return false
+  }
+  await update($, settingsA, effectiveSettings)
+  await bump($)
+  return true
+}
+
 function makeAct($: EngineInterface): Act {
   return {
     // Global: every session on this computer. Project: the project's .token-report/settings.json (the
@@ -794,31 +890,14 @@ function makeAct($: EngineInterface): Act {
     // only, over both, kept until the session ends. A write that fails changes nothing and says so.
     setSetting: async (key, value) => {
       const scope = (await read($, viewA))['settings.scope'] || 'global'
-      try {
-        // Each write starts from what is stored now, so another session's change to another key stays
-        if (scope === 'project') {
-          const dir = projectDir || cwd
-          if (!dir) throw new Error('this session has no folder')
-          const next = { ...(await readProject($, dir).catch(() => ({}))), [key]: value }
-          await $.fs.write(dir + '/.token-report/settings.json', JSON.stringify(next, null, 2) + '\n')
-          localSettings = next
-          projectDir = dir
-        } else if (scope === 'session') {
-          const next = { ...chatSettings, [key]: value }
-          await $.store.set('chat:' + sid, { ...next, at: await $.clock.now() })
-          chatSettings = next
-        } else {
-          const next = { ...validSettings(await $.store.get('settings')), [key]: value }
-          await $.store.set('settings', next)
-          globalSettings = next
-        }
-      } catch (err) {
-        $.ui.toast('Token Report: the setting was not saved (' + String(err) + ')')
-        return
-      }
-      await update($, settingsA, effectiveSettings)
+      if (!(await writeScope($, scope, prev => ({ ...prev, [key]: value })))) return
       if (key === 'currency' && value === 'eur') void refreshFx($)
-      await bump($)
+    },
+    // A profile into the scope picked (or Project, for the Agents page's button), and that scope's own
+    // bundle keys removed, so the row reads clean afterwards
+    setProfile: async (value: Profile, scope?: 'project') => {
+      const into = scope || (await read($, viewA))['settings.scope'] || 'global'
+      await writeScope($, into, prev => withProfile(prev, value))
     },
     // Model calls run past a press's 10 s budget: start them on the clock, the press settles at once
     compact: async () => { $.clock.after(0, () => void startCompact($, '', true, 'button')) },
@@ -826,11 +905,13 @@ function makeAct($: EngineInterface): Act {
 }
 
 async function openPane($: EngineInterface) {
+  isPaneOpen = true
   await update($, uiA, () => ({ isOpen: true }))
   try { await $.store.set('pane.open', true) } catch {}
   await $.ui.open({ id: PANE, title: PANE_TITLE })
 }
 async function closePane($: EngineInterface) {
+  isPaneOpen = false
   await update($, uiA, () => ({ isOpen: false }))
   try { await $.store.set('pane.open', false) } catch {}
   await $.ui.close({ id: PANE })
@@ -903,13 +984,9 @@ async function planAgent($: EngineInterface, e: { subagentType: string; descript
 function logAgentEnd($: EngineInterface, id: string, at: number) {
   const a = L.agents[id]
   if (!a || !isEventLogOn()) return
-  const u = { input: 0, output: 0, cache_read: 0, cache_write: 0 }
-  const tools = { web: 0, browser: 0, read: 0, write: 0, other: 0 }
-  for (const r of L.requests) {
-    if (r.agentId !== id) continue
-    u.input += r.usage.input; u.output += r.usage.output; u.cache_read += r.usage.cacheRead; u.cache_write += r.usage.cacheWrite
-    for (const t of r.tools) tools[toolKind(t)] += 1
-  }
+  // Summed per request in the ledger: whole even after old requests were cut
+  const u = { input: a.usage.input, output: a.usage.output, cache_read: a.usage.cacheRead, cache_write: a.usage.cacheWrite }
+  const tools = a.tools
   void logEvent($, sid, 'agent_end', at, {
     agent_id: id, model: a.model || null, requests: a.requests, usd: usd6(a.usd), ...u,
     tools_web: tools.web, tools_browser: tools.browser, tools_read: tools.read, tools_write: tools.write, tools_other: tools.other,
@@ -940,7 +1017,15 @@ async function sessionTool(tool: string, $: EngineInterface, e: Record<string, u
     context, model_named: named || null, effort_named: typeof e.effort === 'string' ? e.effort : null, parent_model: parent || null,
     parent_tokens: st.tokens, cold: st.isCold, job, setting: settings.sessionStarts, would: about ? 'hand_back' : 'none',
   }
+  const side: Side = {
+    toolUseId: e.tool_use_id, tool: isHandOff ? 'hand_off' : 'start_session', child: null, at: now,
+    title: String(e.title ?? e.name ?? '').slice(0, 80), context, named, parentModel: parent,
+    about: about === 'session_model' || about === 'session_fork' ? about : null,
+    carryUsd: about === 'session_fork' && st.tokens !== null ? forkCarryUsd(st.tokens, parent) : null, result: 'denied',
+  }
+  const keepSide = () => { x.sides = cap([...x.sides, side], MAX_SIDES) }
   if (about && isAct) {
+    keepSide()
     handedBack.add('s:' + job)
     pending.push({ id: e.tool_use_id, job, loop: 'main', about, parent })
     void logEvent($, sid, 'hand_back', now, {
@@ -954,6 +1039,9 @@ async function sessionTool(tool: string, $: EngineInterface, e: Record<string, u
   }
   const r = await next(e)
   const res = startResult(r)
+  side.result = res.result
+  side.child = res.child
+  keepSide()
   void logEvent($, sid, 'side_start', now, { ...line, action: answering ? 'passed_after_hand_back' : 'none', result: res.result, child: res.child })
   if (answering) {
     const answer: Answer = answering.about === 'session_fork' ? (context === 'fork' ? 'fork_again' : 'fresh') : answerOf(named, answering.parent)
@@ -995,6 +1083,7 @@ export const register: Register = (on, options) => {
       }
       await update($, settingsA, effectiveSettings)
       if ((await $.store.get('pane.open')) === true) {
+        isPaneOpen = true
         await update($, uiA, () => ({ isOpen: true }))
         void $.ui.open({ id: PANE, title: PANE_TITLE })
       }
@@ -1007,6 +1096,7 @@ export const register: Register = (on, options) => {
     timers = [
       $.clock.every(15_000, async () => {
         await refresh($)
+        if (isPaneOpen) await readRecords($)
         await cacheTick($)
         await bump($)
         $.ui.invalidate('ui.render')
@@ -1298,6 +1388,8 @@ export const register: Register = (on, options) => {
       noteAgentStart(L, id, {
         description: e.description, type, model, effort: effortOf.get(e.tool_use_id),
         toolUseId: e.tool_use_id, workflow: !!e.workflow, at: now,
+        ...(plan ? { cls: plan.cls, would: plan.would, inherits: plan.inherits, job: plan.job } : {}),
+        named: e.model || '', parentModel: e.parentModel, parentAgent: e.parentAgentId || '',
       })
       // What a type with no model named resolves to: next time it is known whether it inherits
       if (!e.model && !e.fork && model) typeModel[type] = model
@@ -1361,15 +1453,22 @@ export const register: Register = (on, options) => {
       if (warm.pause !== lastPromptAt) logWarmStop($, 'message', lastPromptAt)
       if (!isStartLogged && L.main.model) {
         isStartLogged = true
+        if (childCheck) await Promise.race([childCheck, new Promise<void>(r => void $.clock.after(5_000, () => r()))])
         const setting = (await read($, settingsA)).billing
         const billing = detectBilling(setting, usage?.rateLimits, L.main.requests > 0).billing
-        void logEvent($, sid, 'session_start', now, { model: L.main.model, billing, billing_setting: setting, cache_ttl_min: mainTtlMin(billing, seenTtl), mod_version: modVersion })
+        void logEvent($, sid, 'session_start', now, { model: L.main.model, billing, billing_setting: setting, cache_ttl_min: mainTtlMin(billing, seenTtl), mod_version: modVersion,
+          local_id: x.self?.local || null, parent: x.self?.parent || null, profile: (await read($, settingsA)).profile })
       }
       const moved = limitRows(usage?.rateLimits, limitSeen)
       limitSeen = moved.seen
       for (const row of moved.rows) void logEvent($, sid, 'limit', now, row)
       void sampleAppLimits($, now)
     } catch {}
+    // The layers (v2 slice 3): a session that never asked who it is (loaded mid-session) asks once
+    if (!isSelfAsked && !childCheck) childCheck = isHeldChild($).then(() => undefined).catch(() => undefined)
+    if (childCheck) await Promise.race([childCheck, new Promise<void>(r => void $.clock.after(5_000, () => r()))])
+    await writeOwnRecord($, now)
+    await readRecords($)
     await saveAll($)
     await bump($)
     $.ui.invalidate('ui.render')
@@ -1411,6 +1510,7 @@ export const register: Register = (on, options) => {
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const r = await next(e)
     if (e.origin.kind === 'person') {
+      isPaneOpen = false
       await update($, uiA, () => ({ isOpen: false }))
       try { await $.store.set('pane.open', false) } catch {}
     }

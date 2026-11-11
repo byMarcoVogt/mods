@@ -85,15 +85,8 @@ export function answerOf(named: string, parent: string): Answer {
   return priceFor(named).input < priceFor(parent).input ? 'cheaper' : 'other_model'
 }
 
-// ---- What a subagent did (agent_end) -------------------------------------------------------------
-export type ToolKind = 'web' | 'browser' | 'read' | 'write' | 'other'
-export function toolKind(name: string): ToolKind {
-  if (name === 'WebFetch' || name === 'WebSearch') return 'web'
-  if (/browser|chrome|playwright|pw-/i.test(name)) return 'browser'
-  if (name === 'Read' || name === 'Grep' || name === 'Glob' || name === 'LS') return 'read'
-  if (name === 'Edit' || name === 'Write' || name === 'NotebookEdit' || name === 'MultiEdit') return 'write'
-  return 'other'
-}
+// ---- What a subagent did (agent_end): toolKind lives in ledger.ts, which counts it per request ----
+export { toolKind, type ToolKind } from './ledger'
 
 // ---- The session tools' result text (spike § 1) --------------------------------------------------
 export function startResult(r: unknown): { result: 'started' | 'proposed' | 'refused'; child: string | null } {

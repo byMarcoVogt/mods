@@ -363,9 +363,29 @@ export function drawSettings(ctx: PageCtx): RenderElement {
       {g.rows.filter(r => !r.isHidden).map(rowOf)}
     </Box>
   )
+  // The profile (v2 slice 3): Auto or Managed over the three "steps in" rows, written to the scope picked.
+  // Its fact names the rows set apart from it; its source shows like any row's
+  const pv = d.profile
+  const changedText = pv.changed.length ? pv.changed.length + ' changed: ' + pv.changed.map(c => c.label + (c.from === 'default' ? '' : ' (' + c.from + ')')).join(', ') : ''
+  const profileLine = (
+    <Box key="set-profile" flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+      <Box width={LABEL_W}><Text>Profile</Text></Box>
+      {control('profile', [opt('auto', 'Auto'), opt('managed', 'Managed')], pv.profile, v => ctx.act.setProfile(v as Settings['profile']))}
+      {infoMark('profile', 'Profile', {
+        lines: [
+          ['Auto', 'Token Report only counts: agents, new sessions and turns nobody typed run as asked.'],
+          ['Managed', 'Token Report steps in without stopping work: hands research agents and model-less sessions back once, compacts after turns nobody typed. Dialogs only on turns you typed. Meant for a project where you orchestrate.'],
+        ],
+        note: 'Sets Turns nobody typed, Agent starts and Session starts together. A row changed by hand in the same or a narrower scope wins and shows here.',
+      })}
+      {changedText ? <Text dimColor>{changedText}</Text> : null}
+      {pv.from === 'project' || pv.from === 'session' ? <Text dimColor>{'(' + pv.from + ')'}</Text> : null}
+    </Box>
+  )
   return (
     <Box flexDirection="column" gap={1} paddingX={1}>
       {scopeLine}
+      {profileLine}
       {GROUPS.map(groupOf)}
     </Box>
   )

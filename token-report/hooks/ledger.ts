@@ -86,12 +86,31 @@ export type Req = {
   turnId: string; index: number; agentId: string | null; model: string; effort?: string | number
   startedAt: number; endedAt: number; usage: Usage; tools: string[]; usd: number; rewrite: boolean
 }
+// What a tool call was, by kind (agent_end and the Agents page's "wrote no files")
+export type ToolKind = 'web' | 'browser' | 'read' | 'write' | 'other'
+export function toolKind(name: string): ToolKind {
+  if (name === 'WebFetch' || name === 'WebSearch') return 'web'
+  if (/browser|chrome|playwright|pw-/i.test(name)) return 'browser'
+  if (name === 'Read' || name === 'Grep' || name === 'Glob' || name === 'LS') return 'read'
+  if (name === 'Edit' || name === 'Write' || name === 'NotebookEdit' || name === 'MultiEdit') return 'write'
+  return 'other'
+}
+export const noTools = (): Record<ToolKind, number> => ({ web: 0, browser: 0, read: 0, write: 0, other: 0 })
+const noUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+// The plan's model (v2 slice 3): every request is also priced on it, from its own token counts
+export const PLAN_MODEL = 'claude-sonnet-5-5'
+
 export type Agent = {
   id: string; description: string; type: string; model: string; effort?: string | number
   toolUseId?: string; row?: string; workflow: boolean; turn?: string   // the main turn that started it
   startedAt: number; endedAt?: number; lastRequestAt: number
   requests: number; tokens: number; usd: number
   first?: { read: number; wrote: number }; lastTool?: string
+  // What the router said at the start (slice 2's planAgent), kept for the Agents page
+  cls?: 'gather' | 'other'; would?: 'none' | 'hand_back' | 'note' | 'unknown'; inherits?: boolean | null
+  named?: string; parentModel?: string; parentAgent?: string; job?: string
+  // Summed per request: tokens by kind, the same requests priced on PLAN_MODEL, tool calls by kind
+  usage: Usage; onSonnet: number; tools: Record<ToolKind, number>
 }
 export type Ledger = {
   v: 1; sid: string; since: number; engineUsdAtStart: number | null
@@ -99,6 +118,8 @@ export type Ledger = {
   agents: Record<string, Agent>
   main: { usd: number; requests: number; lastRequestAt: number; model: string | null; rewrites: { count: number; tokens: number; usd: number } }
   parts: { main: Parts; agents: Parts }
+  // Every request, main and agents, priced on PLAN_MODEL (a child reports it as its plan figure)
+  onSonnet: number
   turns: Record<string, TurnSum>          // main turns, the last MAX_TURNS
   currentTurn: string | null
 }
@@ -110,13 +131,18 @@ export const MAX_REQUESTS = 2000, SNAPSHOT_REQUESTS = 200
 export function newLedger(sid: string, since: number, engineUsd: number | null): Ledger {
   return { v: 1, sid, since, engineUsdAtStart: num(engineUsd) ? engineUsd : null, requests: [], folded: { usd: 0, n: 0 }, agents: {},
     main: { usd: 0, requests: 0, lastRequestAt: 0, model: null, rewrites: { count: 0, tokens: 0, usd: 0 } },
-    parts: { main: noParts(), agents: noParts() }, turns: {}, currentTurn: null }
+    parts: { main: noParts(), agents: noParts() }, onSonnet: 0, turns: {}, currentTurn: null }
 }
 
-export type AgentMeta = { description?: string; type?: string; model?: string; effort?: string | number; toolUseId?: string; row?: string; workflow?: boolean; turn?: string; at: number }
+export type AgentMeta = {
+  description?: string; type?: string; model?: string; effort?: string | number; toolUseId?: string; row?: string; workflow?: boolean; turn?: string; at: number
+  cls?: Agent['cls']; would?: Agent['would']; inherits?: boolean | null; named?: string; parentModel?: string; parentAgent?: string; job?: string
+}
+const PLAN_KEYS = ['cls', 'would', 'inherits', 'named', 'parentModel', 'parentAgent', 'job'] as const
 export function noteAgentStart(L: Ledger, id: string, m: AgentMeta): Agent {
   const old = L.agents[id]
-  const a: Agent = old || { id, description: '', type: 'agent', model: '', workflow: false, startedAt: m.at, lastRequestAt: 0, requests: 0, tokens: 0, usd: 0 }
+  const a: Agent = old || { id, description: '', type: 'agent', model: '', workflow: false, startedAt: m.at, lastRequestAt: 0, requests: 0, tokens: 0, usd: 0, usage: noUsage(), onSonnet: 0, tools: noTools() }
+  for (const key of PLAN_KEYS) if (m[key] !== undefined) (a as Record<string, unknown>)[key] = m[key]
   if (m.description) a.description = m.description
   if (m.type) a.type = m.type
   if (m.model) a.model = m.model
@@ -140,6 +166,8 @@ export function addRequest(L: Ledger, r: Omit<Req, 'usd' | 'rewrite'>, ttlMainMi
   const ttl = ttlOf(r.agentId ? ttlSubMin : ttlMainMin)
   const parts = partsOf(r.usage, r.model, ttl)
   const req: Req = { ...r, usd: sumParts(parts), rewrite: isRewrite(r.usage) }
+  const onSonnet = sumParts(partsOf(r.usage, PLAN_MODEL, ttl))
+  L.onSonnet = (L.onSonnet || 0) + onSonnet
   const into = L.parts[r.agentId ? 'agents' : 'main']
   into.input += parts.input; into.output += parts.output; into.read += parts.read; into.write += parts.write
   L.requests.push(req)
@@ -153,6 +181,9 @@ export function addRequest(L: Ledger, r: Omit<Req, 'usd' | 'rewrite'>, ttlMainMi
     a.requests += 1
     a.tokens += tokensOf(r.usage)
     a.usd += req.usd
+    a.onSonnet += onSonnet
+    a.usage.input += r.usage.input; a.usage.output += r.usage.output; a.usage.cacheRead += r.usage.cacheRead; a.usage.cacheWrite += r.usage.cacheWrite
+    for (const tool of r.tools) a.tools[toolKind(tool)] += 1
     a.lastRequestAt = Math.max(a.lastRequestAt, r.startedAt)
     if (r.tools.length) a.lastTool = r.tools[r.tools.length - 1]
     if (!a.model) a.model = r.model
@@ -210,5 +241,11 @@ export function restore(saved: unknown): Ledger | null {
   if (!s.parts || !s.parts.main || !s.parts.agents) s.parts = { main: noParts(), agents: noParts() }
   if (!s.turns || typeof s.turns !== 'object') s.turns = {}
   if (s.currentTurn === undefined) s.currentTurn = null
+  if (!num(s.onSonnet)) s.onSonnet = 0
+  for (const a of Object.values(s.agents)) {
+    if (!a.usage) a.usage = noUsage()
+    if (!num(a.onSonnet)) a.onSonnet = 0
+    if (!a.tools) a.tools = noTools()
+  }
   return s
 }

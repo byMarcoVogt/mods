@@ -3,7 +3,9 @@
 import type { ElementTable } from 'claude-code'
 
 import type { Settings } from '../types'
+import type { Tree } from './agents'
 import type { Billing, Ledger } from './ledger'
+import type { ProfileView } from './profile'
 import type { LineState, UsageView } from './line'
 
 type Desktop = ElementTable<'desktop'>
@@ -43,12 +45,20 @@ export type Data = {
   series: { at: number; turnId: string; ctx: number; usd: number; rewrite: boolean }[]
   // Euros per dollar: the ECB reference rate (isLive), else the fallback constant
   fx: { rate: number; asOf: string; isLive: boolean }
+  // The profile in force, where it comes from, and the bundle keys that differ from it
+  profile: ProfileView
+  // This session's agents and the sessions below it, with actual and plan rolled up (agents.ts)
+  tree: Tree
+  // The session has a folder, so Project scope can be written
+  hasProject: boolean
 }
 
 // What the page can do. Each returns its promise: return it from onPress so the press settles after.
 export type Act = {
   // Into the scope picked at the top of Settings: Global, Project or Session
   setSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => Promise<unknown>
+  // A profile into the scope picked at the top of Settings, or into Project when named
+  setProfile: (value: Settings['profile'], scope?: 'project') => Promise<unknown>
   // Claude Code's own compaction, the same call /compact makes
   compact: () => Promise<unknown>
 }

@@ -4,6 +4,9 @@
 
 export type Settings = {
   billing: 'auto' | 'subscription' | 'api'
+  // Profile (v2 slice 3): a bundle over unattended, agentStarts and sessionStarts. auto: all count ·
+  // managed: all act. A key set by hand in a scope beats that scope's profile (hooks/profile.ts)
+  profile: 'auto' | 'managed'
   // Context management: the threshold in tokens (0 = Max, Claude Code's own auto-compact point), and
   // what happens once a turn crosses it, again every further 100k.
   // remind: a pop-up and Compact in the band · ask: a dialog (Compact / Not now / Stop asking) ·
