@@ -3,34 +3,31 @@
 // Nothing here touches `$`.
 
 // ---- Prices -------------------------------------------------------------------------------
-// USD per million tokens, Anthropic's list prices (checked 2026-10-28). Haiku 5.5: 0.10 / 0.50 up to a
-// 100k prompt, 0.50 / 2.50 beyond; its cache rates are derived from the standard multipliers (read 0.1×,
-// write 1.25× for 5 min, 2× for 1 h), marked `derived`. Update the table when prices change.
-export type Price = { input: number; output: number; cacheRead: number; write5m: number; write1h: number; derived?: boolean }
-const PRICES: Record<string, Price> = {
-  'claude-opus-5-5':   { input: 4,  output: 20, cacheRead: 0.20, write5m: 5,     write1h: 8 },
-  'claude-sonnet-5-5': { input: 2,  output: 10, cacheRead: 0.10, write5m: 2.5,   write1h: 4 },   // read 0.05× (prompt-caching docs, checked 2026-10-28)
-  'claude-fable-5-1':  { input: 10, output: 50, cacheRead: 0.25, write5m: 12.5,  write1h: 20 },
-  'claude-haiku-4-5':  { input: 1,  output: 5,  cacheRead: 0.10, write5m: 1.25,  write1h: 2 },
-}
-const derived = (input: number, output: number): Price =>
-  ({ input, output, cacheRead: input * 0.1, write5m: input * 1.25, write1h: input * 2, derived: true })
-const HAIKU_55 = derived(0.1, 0.5), HAIKU_55_LONG = derived(0.5, 2.5)
-const FALLBACK = 'claude-opus-5-5'
+// USD per million tokens, Anthropic's list prices, from ../prices.json (its `stand` says when they were
+// read) through the generated ./prices.ts (a mod loads only code files). The cost-dashboard skill ships
+// a copy of the same JSON and warns when the two differ. Change prices in prices.json, then run
+// `node gen-prices.mjs`; never here.
+import TABLE from './prices'
+export type Price = { input: number; output: number; cacheRead: number; write5m: number; write1h: number }
+type Row = { input: number; output: number; cache_read: number; cache_write_5m: number; cache_write_1h: number
+  long_context?: { above_prompt_tokens: number; multiplier: number } }
+type Table = { stand: string; fallback: string; families: Record<string, string>; models: Record<string, Row> }
+const T = TABLE as unknown as Table
+export const PRICE_STAND = T.stand
+const KEYS = Object.keys(T.models).sort((a, b) => b.length - a.length)   // longest first: opus-5-5 before opus-5
 
-// The price of the model that answered. An id the table doesn't know (a new or older model, a
-// gateway's alias) takes its family's current price, and only an id with no family name Opus 5.5's.
+// The price of the model that answered. An id matches the longest key it contains (so gateway ids and
+// `[1m]` suffixes still match); an id the table doesn't know (a new model, an alias) takes its
+// family's current price, and only an id with no family name the fallback's (Opus 5.5).
 // Session totals don't depend on this: they come from Claude Code's own figure (sessionUsd).
 export function priceFor(model: string | null | undefined, promptTokens = 0): Price {
   const id = typeof model === 'string' ? model.toLowerCase() : ''
-  const haiku = () => (promptTokens > 100_000 ? HAIKU_55_LONG : HAIKU_55)
-  if (id.includes('claude-haiku-5-5')) return haiku()
-  const exact = Object.keys(PRICES).find(key => id.includes(key))
-  if (exact) return PRICES[exact]!
-  if (id.includes('haiku')) return haiku()
-  if (id.includes('sonnet')) return PRICES['claude-sonnet-5-5']!
-  if (id.includes('fable') || id.includes('mythos')) return PRICES['claude-fable-5-1']!
-  return PRICES[FALLBACK]!
+  const key = KEYS.find(k => id.includes(k))
+    ?? Object.entries(T.families).find(([family]) => id.includes(family))?.[1]
+    ?? T.fallback
+  const r = T.models[key]!
+  const m = r.long_context && promptTokens > r.long_context.above_prompt_tokens ? r.long_context.multiplier : 1
+  return { input: r.input * m, output: r.output * m, cacheRead: r.cache_read * m, write5m: r.cache_write_5m * m, write1h: r.cache_write_1h * m }
 }
 
 // Euros: the fallback rate until the ECB rate arrives (2026 so far averages about 0.86 € per $)

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1 (2026-11-10)
+
+- List prices now live in `prices.json`, checked against Anthropic's pricing page on 2026-11-10. `hooks/prices.ts` is generated from it: edit the JSON, then run `node gen-prices.mjs` in the mod folder (`--check` says whether the generated file is stale).
+- Corrected prices for models that used to fall back to another model's price: Fable 5.2 and Mythos 5.2, cache reads on Fable 5 and Mythos 5, Opus 5 and 4.5 to 4.8, Sonnet 5 cache reads, Sonnet 4.5 and 4.6. A model id now takes the price of its longest matching key, and an unknown Fable or Mythos id takes Fable 5.2's price.
+
 ## 1.3.0 (2026-11-10)
 
 New in v2: turns nobody typed. A message from another session, a notification, a schedule or a started session's brief starts a turn with nobody at the keyboard.
