@@ -6,7 +6,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Settings, UiState } from '../types'
-import { eventsIdle, isEventLogOn, limitRows, logEvent, planOf, startEventLog, usd6 } from './events'
+import { eventsIdle, isEventLogOn, limitKey, limitRows, logEvent, planOf, resetRows, startEventLog, usd6, type ResetNote } from './events'
 import { C, k, money, num, type Act, type Data, type PageCtx, type UI } from './kit'
 import {
   addRequest, clockLeft, detectBilling, mainTtlMin, newLedger, noteAgentEnd, noteAgentStart,
@@ -18,7 +18,7 @@ import {
   isExpensive, jobKey, noteExplicit, ratioTo, roundTripUsd, samePrice, savingUsd, startResult, SUGGESTED,
   type Answer, type Cls, type Signal,
 } from './router'
-import { ctxTokens, drawLine, warnMinutes, type LineState, type UsageView } from './line'
+import { appWindows, bandLimits, ctxTokens, drawLine, warnMinutes, type AppReading, type LineState, type UsageView } from './line'
 import { drawShell } from './shell'
 import { asRecord, buildTree, ownRecord, MAX_SIDES, SIDE_KEY, type Side, type SideRec } from './agents'
 import { mergeLayers, profileView, withProfile, type Profile } from './profile'
@@ -223,6 +223,10 @@ let resendFocus = ''
 // session_start row is written (both stored, so a reload repeats nothing), the mod's version from its
 // plugin.json, and the compaction the mod itself last asked for (who asked, when)
 let limitSeen: Record<string, string> = {}
+// When this session last wrote a limit row per window (limitKey), for resetRows; stored with limitSeen
+let limitAt: Record<string, number> = {}
+// The early resets all sessions noted ($.store, shared): resetRows writes one limit_reset row per drop
+const RESETS_KEY = 'limit-resets'
 let isStartLogged = false
 let modVersion = ''
 type Cause = 'threshold' | 'cold_send' | 'away' | 'wake' | 'button'
@@ -267,14 +271,34 @@ function logWarmStop($: EngineInterface, reason: 'duration' | 'message', at: num
   void logEvent($, sid, 'warm_stop', at, { reason, pings: warm.pings, usd: usd6(warm.usd) })
   warm = { pause: 0, pings: 0, usd: 0 }
 }
-// The desktop app's own usage card has windows the mod API does not report (a per-model weekly limit).
-// Asked through the app's tool once per main turn end, never awaited by a hook. A call that is denied
-// (a permission mode with no rule allowing it), fails or finds no such tool (the terminal) ends it for
-// this session; "unavailable" is asked again next turn.
+// The desktop app's own usage card: account-wide and fresh when asked (the engine's figure is only what
+// this session's last API reply said), with windows the mod API does not report (a per-model weekly
+// limit). The band shows its reading where it is newer (line.tsx bandLimits); the event log gets rows
+// from it when the log is on. Asked through the app's tool, never awaited by a hook: at session start,
+// at each main turn end, when you send a message and the reading is older than APP_PROMPT_MS, and every
+// APP_EVERY_MS while the band is drawn. One call at a time: a call still running blocks the next for up
+// to APP_STUCK_MS (then one more may go). A call that is denied (a permission mode with no rule allowing
+// it), fails or finds no such tool (the terminal) ends it for this session; "unavailable" is asked again.
+// 5 minutes: a reading then never gets older than the band's 10-minute "as of" mark while the band is
+// in view, even with one call missed, at ~12 local tool calls an hour per open session (no API tokens).
 let appLimits: 'ask' | 'asking' | 'off' = 'ask'
-async function sampleAppLimits($: EngineInterface, at: number) {
-  if (appLimits !== 'ask') return
+let appAskedAt = 0
+let app: AppReading | null = null
+// The engine's limit reading: when it was taken (0 = unknown) and what it said (to see it move)
+let engineAt = 0
+let engineSig = ''
+// When the band was last drawn: the slow timer asks only while it is in view
+let bandAt = 0
+const APP_EVERY_MS = 5 * 60_000
+const APP_PROMPT_MS = 2 * 60_000
+const APP_STUCK_MS = 2 * 60_000
+const BAND_SEEN_MS = 60_000
+async function sampleAppLimits($: EngineInterface, at: number, minAgeMs = 0) {
+  if (appLimits === 'off') return
+  if (appLimits === 'asking' && at - appAskedAt < APP_STUCK_MS) return
+  if (minAgeMs && app && at - app.at < minAgeMs) return
   appLimits = 'asking'
+  appAskedAt = at
   const of = sid
   try {
     const plan = planOf(await $.tool.call({ tool: 'mcp__ccd_session_mgmt__get_usage' } as never))
@@ -282,12 +306,30 @@ async function sampleAppLimits($: EngineInterface, at: number) {
     if (!plan || plan.status === 'not_applicable') return void (appLimits = 'off')
     appLimits = 'ask'
     if (plan.status !== 'ok') return
-    const moved = limitRows(plan.windows, limitSeen, 'app')
-    limitSeen = moved.seen
-    for (const row of moved.rows) void logEvent($, sid, 'limit', at, row)
+    app = { at, windows: appWindows(plan.windows) }
+    await logLimits($, plan.windows, 'app', at)
+    await bump($)
+    $.ui.invalidate('ui.render')
   } catch {
     if (of === sid) appLimits = 'off'
   }
+}
+// The event log's rows for one limit reading: a limit row per window that moved, and a limit_reset row
+// for an early reset (compared with what was last written, before limitRows updates it)
+async function logLimits($: EngineInterface, limits: unknown, source: 'engine' | 'app', at: number) {
+  if (!isEventLogOn()) return
+  try {
+    const noted = ((await $.store.get(RESETS_KEY)) ?? {}) as ResetNote
+    const resets = resetRows(limits, limitSeen, limitAt, noted, at, source)
+    if (resets.rows.length) await $.store.set(RESETS_KEY, resets.noted)
+    const moved = limitRows(limits, limitSeen, source)
+    limitSeen = moved.seen
+    for (const row of moved.rows) {
+      limitAt[limitKey(String(row.limit), source)] = at
+      void logEvent($, sid, 'limit', at, row)
+    }
+    for (const row of resets.rows) void logEvent($, sid, 'limit_reset', at, row)
+  } catch {}
 }
 // The cold-send dialog was shown: what sending would reload, and what you chose
 async function logCold($: EngineInterface, choice: 'send' | 'compact_then_send' | 'use_summary' | 'cancel') {
@@ -311,7 +353,7 @@ async function saveAll($: EngineInterface) {
   try { await $.store.set('session:' + sid, { ...s, at }) } catch {}
   try { await $.store.set('ledger:' + sid, { at, ledger: snapshot(L) }) } catch {}
   // The pause's start and a kept idle summary too: a hot reload keeps the Cache Warmer going
-  try { await $.store.set('extra:' + sid, { ...x, at, lastPromptAt, precomputedAt, limitSeen, isStartLogged }) } catch {}
+  try { await $.store.set('extra:' + sid, { ...x, at, lastPromptAt, precomputedAt, limitSeen, limitAt, isStartLogged, engineAt, engineSig }) } catch {}
 }
 // A new session id: at start, after /clear (no session.start fires for it) or a resume. Nothing the
 // last chat had pending carries over, and its Session settings are this chat's own.
@@ -354,7 +396,7 @@ async function openSession($: EngineInterface, id: string, now: number) {
   const saved = (await $.store.get('ledger:' + sid)) as { ledger?: unknown } | undefined
   const engine = usage && usage.cost && num(usage.cost.usd) ? usage.cost.usd : null
   L = restore(saved && saved.ledger) || newLedger(sid, now, engine)
-  const ex = (await $.store.get('extra:' + sid)) as (Extra & { lastPromptAt?: unknown; precomputedAt?: unknown; limitSeen?: unknown; isStartLogged?: unknown }) | undefined
+  const ex = (await $.store.get('extra:' + sid)) as (Extra & { lastPromptAt?: unknown; precomputedAt?: unknown; limitSeen?: unknown; limitAt?: unknown; isStartLogged?: unknown; engineAt?: unknown; engineSig?: unknown }) | undefined
   x = ex && Array.isArray(ex.series) ? {
     ...freshExtra(), series: ex.series, sides: Array.isArray(ex.sides) ? ex.sides : [],
     self: ex.self && typeof ex.self === 'object' && typeof (ex.self as SelfRec).local === 'string' ? ex.self as SelfRec : null,
@@ -364,6 +406,10 @@ async function openSession($: EngineInterface, id: string, now: number) {
   precomputedAt = num(ex?.precomputedAt) ? ex.precomputedAt : 0
   limitSeen = ex?.limitSeen && typeof ex.limitSeen === 'object' ? { ...(ex.limitSeen as Record<string, string>) } : {}
   isStartLogged = ex?.isStartLogged === true
+  limitAt = ex?.limitAt && typeof ex.limitAt === 'object' ? { ...(ex.limitAt as Record<string, number>) } : {}
+  // The engine's reading as this session last knew it; one not seen before is as old as the last reply
+  engineSig = limitSig(usage)
+  engineAt = num(ex?.engineAt) && ex?.engineSig === engineSig ? ex.engineAt : L.main.lastRequestAt || 0
   warned = new Set()
   try {
     const c = (await $.store.get('chat:' + sid)) as Record<string, unknown> | undefined
@@ -383,7 +429,14 @@ async function syncSession($: EngineInterface) {
 async function refresh($: EngineInterface) {
   try { usage = (await $.session.usage()) as unknown as UsageView } catch {}
   await syncSession($)
+  // The engine's figure moved (a reply of this session or its agents): taken now
+  const sig = limitSig(usage)
+  if (sig !== engineSig) {
+    if (engineSig) engineAt = await $.clock.now().catch(() => engineAt)
+    engineSig = sig
+  }
 }
+const limitSig = (u: UsageView) => JSON.stringify((u && u.rateLimits) || [])
 // Euros per dollar, only once € is chosen: the ECB reference rate (api.frankfurter.app, no key), at
 // most twice a day, kept in $.store so a new session starts with it; the fixed rate stands in until a
 // fetch succeeds. The rate is written into Settings.eurRate, so every amount follows it.
@@ -448,7 +501,7 @@ async function snapshotData($: EngineInterface): Promise<Data> {
   const model = L.main.model
   const p = priceFor(model, tokens ?? 0)
   return {
-    now, L, s, usage, window: windowTokens, compactAt, target: thresholdOf(settings), billing, ttlMin,
+    now, L, s, usage, limits: bandLimits(usage, engineAt, app, model), window: windowTokens, compactAt, target: thresholdOf(settings), billing, ttlMin,
     projectKeys: Object.keys(localSettings), sessionKeys: Object.keys(chatSettings), lastSummary, idleThreshold,
     folder: (projectDir || cwd).split(/[\\/]/).filter(Boolean).pop() || cwd,
     cacheLeft: clockLeft(L.main.lastRequestAt, ttlMin, now),
@@ -1059,6 +1112,7 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
       await refresh($)
       await openSession($, String(await $.session.id()), now)
+      void sampleAppLimits($, now)
       try { globalSettings = validSettings(await $.store.get('settings')) } catch {}
       try { cwd = await $.session.cwd() } catch {}
       // A subagent model set for the whole session: then no omitted model inherits the parent's
@@ -1102,6 +1156,11 @@ export const register: Register = (on, options) => {
         $.ui.invalidate('ui.render')
       }),
       $.clock.every(5 * 60_000, () => refreshBreakdown($)),
+      // The app's limit reading, only while the band is in view (it is drawn at least every 15 s then)
+      $.clock.every(APP_EVERY_MS, async () => {
+        const now = await $.clock.now()
+        if (now - bandAt < BAND_SEEN_MS) void sampleAppLimits($, now, APP_EVERY_MS / 2)
+      }),
       $.clock.every(6 * 3_600_000, () => refreshFx($)),
       // The working animation: a frame every 350 ms while a main turn runs, nothing otherwise
       $.clock.every(350, async () => {
@@ -1197,6 +1256,8 @@ export const register: Register = (on, options) => {
         isCompactOwed = false
       }
       isNextTurnAuto = isAuto
+      // You are back after a pause: a fresh limit reading for the band, not awaited
+      if (!isAuto) void $.clock.now().then(now => sampleAppLimits($, now, APP_PROMPT_MS)).catch(() => undefined)
       // A turn nobody typed (the mod's own sending again excepted: it continues one): what the cache is
       // like, and under Act, compact first when it is cold (case B)
       const isOwn = e.origin?.kind === 'plugin' && (e.origin as { name?: string }).name === PANE
@@ -1431,6 +1492,8 @@ export const register: Register = (on, options) => {
     isWorking = false
     waitingAsks = 0
     await refresh($)
+    // A reply just came: the engine's limit figure is as of now, moved or not
+    if ((usage?.rateLimits || []).length) engineAt = now
     const u = e.usage
     if (u) {
       const u4 = toUsage(u)
@@ -1459,11 +1522,9 @@ export const register: Register = (on, options) => {
         void logEvent($, sid, 'session_start', now, { model: L.main.model, billing, billing_setting: setting, cache_ttl_min: mainTtlMin(billing, seenTtl), mod_version: modVersion,
           local_id: x.self?.local || null, parent: x.self?.parent || null, profile: (await read($, settingsA)).profile })
       }
-      const moved = limitRows(usage?.rateLimits, limitSeen)
-      limitSeen = moved.seen
-      for (const row of moved.rows) void logEvent($, sid, 'limit', now, row)
-      void sampleAppLimits($, now)
+      await logLimits($, usage?.rateLimits, 'engine', now)
     } catch {}
+    void sampleAppLimits($, now)
     // The layers (v2 slice 3): a session that never asked who it is (loaded mid-session) asks once
     if (!isSelfAsked && !childCheck) childCheck = isHeldChild($).then(() => undefined).catch(() => undefined)
     if (childCheck) await Promise.race([childCheck, new Promise<void>(r => void $.clock.after(5_000, () => r()))])
@@ -1495,6 +1556,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    bandAt = await $.clock.now().catch(() => bandAt)
     const ui = $.ui.resolve(e) as unknown as UI
     const theirs = await next(e)
     const { isOpen } = await read($, uiA)

@@ -30,6 +30,68 @@ export const resetMs = (l: Limit | undefined) => {
   const t = l && l.resetsAt ? new Date(l.resetsAt).getTime() : NaN
   return num(t) ? t : null
 }
+// ---- the plan limits the band shows ------------------------------------------------------------------
+// Two sources. The engine's ($.session.usage().rateLimits) is what the last API reply of this session
+// reported: it does not move while the session is idle, so a reset or another session's use stays
+// unseen until the next reply. The desktop app's usage card (its tool, read by register.tsx) is
+// account-wide and fresh when asked, and also has per-model weekly windows. The band shows, per window,
+// whichever reading is newer, each with the time it was taken (`at`; 0 = unknown).
+export type AppWindow = { label: string; percentUsed: number; resetsAt?: string }
+export type AppReading = { at: number; windows: AppWindow[] }
+export type Shown = Limit & { at: number; source: 'engine' | 'app'; name?: string }
+export type BandLimits = { five?: Shown; week?: Shown }
+// A reading older than this says "as of 14:23" in the band
+export const STALE_MS = 10 * 60_000
+// A per-model weekly window for a model this session does not run on shows from this share on
+export const OTHER_MODEL_PERCENT = 90
+
+export function appWindows(windows: unknown): AppWindow[] {
+  const out: AppWindow[] = []
+  for (const w of Array.isArray(windows) ? windows : []) {
+    if (!w || typeof w.label !== 'string' || !num(w.percentUsed)) continue
+    out.push({ label: w.label, percentUsed: w.percentUsed, ...(typeof w.resetsAt === 'string' ? { resetsAt: w.resetsAt } : {}) })
+  }
+  return out
+}
+// "Weekly · Fable" → 'Fable'; '' for the general weekly window ("Weekly · all models") and the rest
+export const modelOfWindow = (label: string) => {
+  const m = /^weekly\s*[·:-]\s*(.+)$/i.exec(label.trim())
+  return m && !/^all /i.test(m[1]! + ' ') ? m[1]!.trim() : ''
+}
+const isFiveHour = (label: string) => /^5.?hour/i.test(label.trim())
+const isWeeklyAll = (label: string) => /^weekly(?![a-z])/i.test(label.trim()) && !modelOfWindow(label)
+
+// The 5-hour and weekly reading the band shows. The weekly one is the tightest that concerns this
+// session: a per-model window (app only) replaces the general one when it is fuller and either applies
+// to the session's model (`model` contains its name: 'claude-fable-5-2' and "Fable") or is at
+// OTHER_MODEL_PERCENT or more (a limit about to stop another model is worth seeing before switching).
+export function bandLimits(usage: UsageView, engineAt: number, app: AppReading | null, model: string | null): BandLimits {
+  const eng = (kind: string): Shown | undefined => {
+    const l = limitOf(usage, kind)
+    return l ? { ...l, at: engineAt, source: 'engine' } : undefined
+  }
+  const fromApp = (w: AppWindow | undefined): Shown | undefined =>
+    w && app ? { kind: w.label, percentUsed: w.percentUsed, ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}), at: app.at, source: 'app' } : undefined
+  // Same moment (both read at a turn end): the app, account-wide
+  const newer = (a: Shown | undefined, b: Shown | undefined) => (!a ? b : !b ? a : b.at >= a.at ? b : a)
+  const windows = app ? app.windows : []
+  const five = newer(eng('five_hour'), fromApp(windows.find(w => isFiveHour(w.label))))
+  let week = newer(eng('seven_day'), fromApp(windows.find(w => isWeeklyAll(w.label))))
+  let tight: Shown | undefined
+  for (const w of windows) {
+    const name = modelOfWindow(w.label)
+    if (!name) continue
+    const applies = !!model && model.toLowerCase().includes(name.toLowerCase())
+    if (!applies && w.percentUsed < OTHER_MODEL_PERCENT) continue
+    if (week && w.percentUsed <= week.percentUsed) continue
+    if (tight && w.percentUsed <= tight.percentUsed) continue
+    tight = { ...fromApp(w)!, name }
+  }
+  if (tight) week = tight
+  return { five, week }
+}
+export const clockTime = (ms: number) => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
+
 // What the last turn added, the same look for Context and Session: " (↑30k)", " (↓12k)"
 export const grown = (value: string, isDown = false) => ' (' + (isDown ? '↓' : '↑') + value + ')'
 
@@ -134,20 +196,36 @@ export function drawLine(ui: UI, o: LineInput): RenderElement {
       push(p)
     }
 
-    // Plan limits: only on a subscription. "5h: 35% ↻ 1h 54m (14:30)"
+    // Plan limits: only on a subscription. "5h: 35% ↻ 1h 54m (14:30) │ Weekly: 81%", the newer of
+    // the two sources per window; "Weekly Fable: 98%" when a per-model window is the tightest; " · as of
+    // 14:23" after the last one shown when a shown reading is older than STALE_MS (the oldest one's time)
     if (d.billing.billing !== 'api') {
-      const five = limitOf(d.usage, 'five_hour'), week = limitOf(d.usage, 'seven_day')
+      const { five, week } = d.limits
+      const shown: Shown[] = []
       if (five) {
+        shown.push(five)
         const reset = resetMs(five)
         const p: RenderElement[] = [...label('5h', 'f-l'), col(Math.round(five.percentUsed) + '%', paceColor(five.percentUsed, reset === null ? null : Math.max(0, reset - d.now)), 'f-v')]
         if (reset !== null) {
           const left = Math.max(0, reset - d.now)
-          const at = new Date(reset).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
+          const at = clockTime(reset)
           p.push(dim(' ↻ ' + mins(left / 60_000) + (level < NO_EXTRAS ? ' (' + at + ')' : ''), 'f-r'))
         }
         push(p)
       }
-      if (week && level < NO_WEEKLY) push([...label('Weekly', 'w-l'), col(Math.round(week.percentUsed) + '%', stateColor(week.percentUsed / 100, false), 'w-v')])
+      if (week && level < NO_WEEKLY) {
+        shown.push(week)
+        // A per-model window keeps its name when the labels go: "Fable 98%" never reads as the general one
+        const head = week.name ? [dim(level < NO_LABELS ? 'Weekly ' + week.name + ': ' : week.name + ' ', 'w-l')] : label('Weekly', 'w-l')
+        push([...head, col(Math.round(week.percentUsed) + '%', stateColor(week.percentUsed / 100, false), 'w-v')])
+      }
+      const known = shown.filter(r => r.at > 0)
+      const oldest = known.length ? Math.min(...known.map(r => r.at)) : 0
+      if (oldest && d.now - oldest > STALE_MS) {
+        const mark = ' · as of ' + clockTime(oldest)
+        parts[parts.length - 1]!.push(dim(mark, 'l-asof'))
+        widths[widths.length - 1]! += mark.length
+      }
     }
     return { parts, widths }
   }

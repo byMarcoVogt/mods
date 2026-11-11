@@ -88,11 +88,11 @@ test('planOf: the plan from a tool answer as an object or as JSON text; nothing 
 })
 
 for (const [name, answer, calls, rows] of [
-  ['answers', () => ({ result: card([win('5-hour limit', 55), win('Weekly · all models', 58), win('Weekly · Fable', 59)]) }), 3, 3],
+  ['answers', () => ({ result: card([win('5-hour limit', 55), win('Weekly · all models', 58), win('Weekly · Fable', 59)]) }), 4, 3],
   ['is denied', () => ({ deny: 'no rule allows it' }), 1, 0],
   ['is missing', () => { throw new Error('no tool has that name') }, 1, 0],
 ] as const) {
-  test('the app\'s usage tool ' + name + ': ' + rows + ' rows, asked ' + calls + ' time(s) in three turns', ON, async ($, on) => {
+  test('the app\'s usage tool ' + name + ': ' + rows + ' rows, asked ' + calls + ' time(s) in a start and three turns', ON, async ($, on) => {
     let asked = 0
     const w = await world($, on, {
       first: () => on('tool.call', { tool: 'mcp__ccd_session_mgmt__get_usage' }, async () => { asked++; return answer() as never }),

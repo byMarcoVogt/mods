@@ -24,7 +24,7 @@ The cache lives 1 hour on a subscription and 5 minutes with an API key. Claude C
 - **Context**: the chat's size and what the last turn added. At your threshold (400k by default) it reminds you, asks or compacts.
 - **Cache**: minutes until the cache goes cold.
 - **Session**: what this session has cost so far.
-- **5h** and **Weekly**: your plan limits and when they reset, on a subscription.
+- **5h** and **Weekly**: your plan limits and when they reset, on a subscription. The band shows the newest reading it has, from Claude Code's last reply or the desktop app's usage card, and adds "as of 14:23" when that is older than 10 minutes. A per-model weekly limit takes Weekly's place, named ("Weekly Fable: 98%"), when it is fuller and the session runs on that model or it is at 90% or more.
 - **≣ Report** opens the pane. **⤓** compacts the chat now, while the cache is warm.
 
 Once the cache has gone cold, the band says what the next send costs:
@@ -86,6 +86,7 @@ Each line starts with `ts` (UTC), `session` and `kind`, then the fields of that 
 |---|---|
 | `session_start` | after the first reply: model, billing, cache lifetime, mod version, profile |
 | `limit` | a plan limit's percent or reset time changed |
+| `limit_reset` | a plan limit fell before its reset time (an early reset): percent and reset time before and after |
 | `compact` | a compaction went through: tokens before and after, who started it, why, its price |
 | `warm_start`, `keep_warm`, `warm_stop` | a Cache Warmer pause, each ping, its end with the total |
 | `cold_send` | the cold-send dialog was answered: tokens, price, choice |
@@ -99,7 +100,7 @@ Ids and numbers only: no titles, prompts or paths. Kinds and fields are only eve
 ## What it touches
 
 - **Hooks:** prompt submit, turns, tool calls, agent starts, compaction, model switch and session start and end. It reads token usage from Claude Code on your machine. Nothing is sent anywhere.
-- **Desktop app tools:** once per session it asks the app whether another session started this one. With the event log on, it also reads the app's usage card for plan limits. A denied call is not repeated.
+- **Desktop app tools:** it reads the app's usage card for plan limits: at session start, at each turn's end, when you write after a pause, and every 5 minutes while the band is in view. One call at a time, local, no tokens. Once per session it also asks the app whether another session started this one. A denied call is not repeated.
 - **Network:** only with € chosen, at most twice a day, one call to api.frankfurter.app for the ECB dollar-to-euro rate. No telemetry.
 - **Tokens:** out of the box it spends none. The Cache Warmer, if you switch it on, sends short pings that read the whole chat at the cache price. Compacting, by you, by a setting or under Managed, writes a summary like any compaction.
 - **Files:** Settings for Project scope go into `.token-report/settings.json` in your project folder. Global and Session settings stay in Claude Code's own plugin storage. So does what started sessions report for the Agents page, for 3 days. The event log writes only into the folder you name.

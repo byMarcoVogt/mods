@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1 (2026-11-11)
+
+- The band shows the freshest plan limits. Claude Code's figures only change with a reply, so an idle band missed an early reset. The mod now also reads the desktop app's usage card: at session start, at each turn's end, when you write after a pause, and every 5 minutes while the band is in view. Per limit the band shows the newer reading, with "as of 14:23" when it is older than 10 minutes.
+- A per-model weekly limit that is fuller takes Weekly's place, named ("Weekly Fable: 98%"), when the session runs on that model or it is at 90% or more.
+- Event log: a `limit_reset` line when a limit falls while its reset time is still ahead, once per limit, across reloads and sessions.
+
 ## 1.5.0 (2026-11-10)
 
 New in v2: the Agents page and the profile.

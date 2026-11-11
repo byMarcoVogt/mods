@@ -1,6 +1,6 @@
 {
   "name": "token-report",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "A band above the prompt with context size, cache clock, session cost and plan limits, plus a Settings pane for what happens to the cache and the context while you are away. For the Claude desktop app's Code tab.",
   "author": {
     "name": "Marco Vogt"
