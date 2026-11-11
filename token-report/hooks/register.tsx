@@ -6,6 +6,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Settings, UiState } from '../types'
+import { isEventLogOn, limitRows, logEvent, planOf, startEventLog, usd6 } from './events'
 import { C, k, money, num, type Act, type Data, type PageCtx, type UI } from './kit'
 import {
   addRequest, clockLeft, detectBilling, mainTtlMin, newLedger, noteAgentEnd, noteAgentStart,
@@ -141,6 +142,16 @@ let resendText = ''
 let askText = ''
 // What "Compact, then send" asked the summary to focus on (kept for a retry)
 let resendFocus = ''
+// The event log (events.ts): what the last limit rows written for this session said, whether its
+// session_start row is written (both stored, so a reload repeats nothing), the mod's version from its
+// plugin.json, and the compaction the mod itself last asked for (who asked, when)
+let limitSeen: Record<string, string> = {}
+let isStartLogged = false
+let modVersion = ''
+let modCompact: { isByUser: boolean; at: number } | null = null
+const MOD_COMPACT_MS = 10 * 60_000
+// The compaction owed was asked for by you (the cold-send dialog), not by a rule
+let isOwedByUser = false
 // Counts session switches: work started on the clock for one chat never lands in the next
 let gen = 0
 const later = ($: EngineInterface, ms: number, fn: () => unknown) => {
@@ -148,7 +159,65 @@ const later = ($: EngineInterface, ms: number, fn: () => unknown) => {
   $.clock.after(ms, async () => { if (gen === at) await fn() })
 }
 // A compaction started on the clock runs only if one is still owed: another path may have done it meanwhile
-const compactLater = ($: EngineInterface, focus = '') => later($, 1500, () => isCompactOwed && compactNow($, focus))
+const compactLater = ($: EngineInterface, focus = '') => later($, 1500, () => isCompactOwed && startCompact($, focus))
+// A compaction the mod asks for, noted for the event log (who asked, when) before compactNow runs it.
+// The note stands until a compaction lands or 10 minutes pass: a refused one is tried again later.
+async function startCompact($: EngineInterface, focus = '', isByUser = false) {
+  if (!isCompacting) modCompact = { isByUser: isByUser || (isCompactOwed && isOwedByUser), at: await $.clock.now().catch(() => 0) }
+  return compactNow($, focus)
+}
+// The event log's rows for what the mod does to prevent cost. The Cache Warmer per pause (a pause starts
+// with your message at lastPromptAt): warm_start before its first ping, keep_warm per ping, warm_stop
+// when its duration is over or you are back. Kept in memory only: a reload mid-pause starts a new count.
+let warm = { pause: 0, pings: 0, usd: 0 }
+function logPing($: EngineInterface, at: number, u: Usage, refreshed: boolean) {
+  if (!isEventLogOn()) return
+  const model = L.main.model
+  if (warm.pause !== lastPromptAt || !warm.pings) {
+    warm = { pause: lastPromptAt, pings: 0, usd: 0 }
+    void logEvent($, sid, 'warm_start', at, { model, tokens: promptOf(u), idle_min: lastPromptAt > 0 ? Math.round((at - lastPromptAt) / 60_000) : null })
+  }
+  const usd = usd6(usdFor(u, model))
+  warm.pings += 1
+  warm.usd += usd
+  void logEvent($, sid, 'keep_warm', at, { usd, model, tokens: promptOf(u), refreshed })
+}
+function logWarmStop($: EngineInterface, reason: 'duration' | 'message', at: number) {
+  if (!warm.pings) return
+  void logEvent($, sid, 'warm_stop', at, { reason, pings: warm.pings, usd: usd6(warm.usd) })
+  warm = { pause: 0, pings: 0, usd: 0 }
+}
+// The desktop app's own usage card has windows the mod API does not report (a per-model weekly limit).
+// Asked through the app's tool once per main turn end, never awaited by a hook. A call that is denied
+// (a permission mode with no rule allowing it), fails or finds no such tool (the terminal) ends it for
+// this session; "unavailable" is asked again next turn.
+let appLimits: 'ask' | 'asking' | 'off' = 'ask'
+async function sampleAppLimits($: EngineInterface, at: number) {
+  if (appLimits !== 'ask') return
+  appLimits = 'asking'
+  const of = sid
+  try {
+    const plan = planOf(await $.tool.call({ tool: 'mcp__ccd_session_mgmt__get_usage' } as never))
+    if (of !== sid) return
+    if (!plan || plan.status === 'not_applicable') return void (appLimits = 'off')
+    appLimits = 'ask'
+    if (plan.status !== 'ok') return
+    const moved = limitRows(plan.windows, limitSeen, 'app')
+    limitSeen = moved.seen
+    for (const row of moved.rows) void logEvent($, sid, 'limit', at, row)
+  } catch {
+    if (of === sid) appLimits = 'off'
+  }
+}
+// The cold-send dialog was shown: what sending would reload, and what you chose
+async function logCold($: EngineInterface, choice: 'send' | 'compact_then_send' | 'use_summary' | 'cancel') {
+  if (!isEventLogOn()) return
+  try {
+    const d = await snapshotData($)
+    const tokens = d.s.compacted?.after ?? ctxTokens(d.usage)
+    void logEvent($, sid, 'cold_send', d.now, { tokens: num(tokens) ? tokens : null, usd: num(d.rewriteUsd) ? usd6(d.rewriteUsd) : null, model: L.main.model, choice })
+  } catch {}
+}
 
 const cap = <T,>(xs: T[], n = 200) => (xs.length > n ? xs.slice(-n) : xs)
 const bump = ($: EngineInterface) => update($, revA, n => n + 1).catch(() => undefined)
@@ -162,7 +231,7 @@ async function saveAll($: EngineInterface) {
   try { await $.store.set('session:' + sid, { ...s, at }) } catch {}
   try { await $.store.set('ledger:' + sid, { at, ledger: snapshot(L) }) } catch {}
   // The pause's start and a kept idle summary too: a hot reload keeps the Cache Warmer going
-  try { await $.store.set('extra:' + sid, { ...x, at, lastPromptAt, precomputedAt }) } catch {}
+  try { await $.store.set('extra:' + sid, { ...x, at, lastPromptAt, precomputedAt, limitSeen, isStartLogged }) } catch {}
 }
 // A new session id: at start, after /clear (no session.start fires for it) or a resume. Nothing the
 // last chat had pending carries over, and its Session settings are this chat's own.
@@ -176,6 +245,9 @@ async function openSession($: EngineInterface, id: string, now: number) {
     resendText = ''
     resendFocus = ''
     isCompactOwed = false
+    isOwedByUser = false
+    modCompact = null
+    appLimits = 'ask'
     isNextTurnAuto = false
     lastSummary = null
     pingFailedAt = 0
@@ -185,10 +257,12 @@ async function openSession($: EngineInterface, id: string, now: number) {
   const saved = (await $.store.get('ledger:' + sid)) as { ledger?: unknown } | undefined
   const engine = usage && usage.cost && num(usage.cost.usd) ? usage.cost.usd : null
   L = restore(saved && saved.ledger) || newLedger(sid, now, engine)
-  const ex = (await $.store.get('extra:' + sid)) as (Extra & { lastPromptAt?: unknown; precomputedAt?: unknown }) | undefined
+  const ex = (await $.store.get('extra:' + sid)) as (Extra & { lastPromptAt?: unknown; precomputedAt?: unknown; limitSeen?: unknown; isStartLogged?: unknown }) | undefined
   x = ex && Array.isArray(ex.series) ? { ...freshExtra(), series: ex.series } : freshExtra()
   lastPromptAt = num(ex?.lastPromptAt) ? ex.lastPromptAt : 0
   precomputedAt = num(ex?.precomputedAt) ? ex.precomputedAt : 0
+  limitSeen = ex?.limitSeen && typeof ex.limitSeen === 'object' ? { ...(ex.limitSeen as Record<string, string>) } : {}
+  isStartLogged = ex?.isStartLogged === true
   warned = new Set()
   try {
     const c = (await $.store.get('chat:' + sid)) as Record<string, unknown> | undefined
@@ -305,6 +379,7 @@ async function ping($: EngineInterface) {
     const startedAt = await $.clock.now()
     const r = await $.model.fork({ prompt: 'Reply with the single word: ok' })
     if (!r.isAnswered) {
+      logPing($, startedAt, toUsage(r.usage), false)
       pingFailedAt = startedAt
       toastOnce($, 'ping-failed-' + lastPromptAt, 'Cache Warmer: a ping failed (' + r.reason + ')')
       return
@@ -319,6 +394,7 @@ async function ping($: EngineInterface) {
     // An answer without a cache read kept nothing warm: it waits like a failure, not every 15 s
     if (u.cacheRead > 0) L.main.lastRequestAt = startedAt
     else pingFailedAt = startedAt
+    logPing($, startedAt, u, u.cacheRead > 0)
     await saveAll($)
     await bump($)
   } catch (err) {
@@ -344,12 +420,26 @@ let lastSummary: number | null = null
 
 // After any compaction that stood: the pop-up, the band starts over, and a message the cold-send dialog
 // held goes again
-async function afterCompaction($: EngineInterface, r: { tokensBefore?: number; tokensAfter?: number }, sizeBefore: number | null) {
+async function afterCompaction($: EngineInterface, r: { tokensBefore?: number; tokensAfter?: number }, sizeBefore: number | null, trigger?: string) {
   isCompactionSeen = true
   const after = r.tokensAfter
   if (num(after)) lastSummary = after
   // The engine reports the sizes only when it compacted itself; else the size the band last showed
   const before = num(r.tokensBefore) ? r.tokensBefore : sizeBefore
+  // The event log: who ran it and whether a person asked for it. One the mod asked for shortly before
+  // is the mod's, also when it ran as Claude Code's /compact (the desktop app's way), and so is one that
+  // lands while the mod still owes one (a refused compaction waits, queued, for the turn to end).
+  try {
+    const now = await $.clock.now()
+    const mine = modCompact && now - modCompact.at < MOD_COMPACT_MS ? modCompact : isCompactOwed ? { isByUser: isOwedByUser } : null
+    modCompact = null
+    void logEvent($, sid, 'compact', now, {
+      tokens_before: num(before) ? before : null, tokens_after: num(after) ? after : null,
+      by: mine || trigger === undefined || trigger === 'plugin' ? 'token_report' : 'claude_code',
+      automatic: mine ? !mine.isByUser : trigger !== 'manual',
+      trigger: trigger ?? 'plugin', context_target: (await read($, settingsA)).contextTarget,
+    })
+  } catch {}
   if (num(before)) $.ui.toast('Compacted ' + k(before) + (num(after) ? ' → ' + k(after) : ''))
   if (resendText) {
     const text = resendText
@@ -366,6 +456,7 @@ async function afterCompaction($: EngineInterface, r: { tokensBefore?: number; t
   s.compactions += 1
   // Any compaction (yours, Claude Code's own) settles what was owed and uses up a kept summary
   isCompactOwed = false
+  isOwedByUser = false
   precomputedAt = 0
   await saveAll($)
   await bump($)
@@ -450,6 +541,7 @@ async function checkTarget($: EngineInterface) {
   if (settings.atTarget === 'compact') {
     $.ui.toast('Context: ' + k(tokens) + ' (compacting)')
     isCompactOwed = true
+    isOwedByUser = false
     return void compactLater($)
   }
   if (stopAskingSid === sid || isAsking) return
@@ -460,7 +552,7 @@ async function checkTarget($: EngineInterface) {
     isAsking = true
     const answer = await $.ui.ask(above + '. Compact now? The cache is warm, so it is cheap now.', { header: 'Context', options: ['Compact', 'Not now', 'Stop asking (this session)'] }).catch(() => 'Not now')
     isAsking = false
-    if (answer === 'Compact') return compactNow($)
+    if (answer === 'Compact') return startCompact($, '', true)
     if (answer.startsWith('Stop asking')) stopAskingSid = sid
   })
 }
@@ -507,7 +599,8 @@ async function cacheTick($: EngineInterface) {
   // goes cold at full size); a kept idle summary is used if Claude Code still has one
   if (!warming && isWarmAway(settings) && lastPromptAt > 0 && !warned.has('warm-end-' + lastPromptAt)) {
     toastOnce($, 'warm-end-' + lastPromptAt, 'Cache Warmer stopped')
-    if (settings.away === 'warm-compact' && left > 0 && isBig) void compactNow($)
+    logWarmStop($, 'duration', d.now)
+    if (settings.away === 'warm-compact' && left > 0 && isBig) void startCompact($)
   }
   // "Compact": shortly before a 1 h cache goes cold, once per pause, under Claude Code's idle threshold
   // (from it on, Claude Code's own idle compaction writes its summary and puts it in when you return).
@@ -515,7 +608,7 @@ async function cacheTick($: EngineInterface) {
   const isUnderIdle = num(tokens) && (idleThreshold === null || tokens < idleThreshold)
   if (settings.away === 'compact' && d.ttlMin >= 60 && lastPromptAt > 0 && left > 0 && left <= COMPACT_BEFORE_MIN && isBig && isUnderIdle && !warned.has('away-' + lastPromptAt)) {
     warned.add('away-' + lastPromptAt)
-    return void compactNow($)
+    return void startCompact($)
   }
   if (left > 0 && left <= warnMinutes(d.ttlMin) && !warming) toastOnce($, 'cache-' + L.main.lastRequestAt, 'Cache: ' + Math.max(1, Math.ceil(left)) + 'm')
 }
@@ -554,7 +647,7 @@ function makeAct($: EngineInterface): Act {
       await bump($)
     },
     // Model calls run past a press's 10 s budget: start them on the clock, the press settles at once
-    compact: async () => { $.clock.after(0, () => void compactNow($)) },
+    compact: async () => { $.clock.after(0, () => void startCompact($, '', true)) },
   }
 }
 
@@ -569,8 +662,10 @@ async function closePane($: EngineInterface) {
   await $.ui.close({ id: PANE })
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
+    startEventLog(options?.eventLogFolder)
+    try { modVersion = String(JSON.parse(await $.fs.read($.plugin.root + '/.claude-plugin/plugin.json')).version || '') } catch {}
     try {
       const now = await $.clock.now()
       await refresh($)
@@ -677,7 +772,7 @@ export const register: Register = on => {
     const sizeBefore = ctxTokens(usage)
     const r = await next(e)
     if (e.agentId || e.trigger === 'precompute' || !r || r.skip) return r
-    await afterCompaction($, r as { tokensBefore?: number; tokensAfter?: number }, sizeBefore)
+    await afterCompaction($, r as { tokensBefore?: number; tokensAfter?: number }, sizeBefore, e.trigger)
     return r
   })
 
@@ -750,6 +845,7 @@ export const register: Register = on => {
       const options = text ? ['Send anyway', second, 'Cancel'] : ['Send anyway', 'Cancel']
       const answer = await $.ui.ask(question, { header: 'Cold cache', options })
         .catch(async () => ((await $.session.surfaces().catch(() => [])).length ? 'Cancel' : 'Send anyway'))
+      void logCold($, answer === 'Cancel' ? 'cancel' : answer === second && text ? (hasSummary ? 'use_summary' : 'compact_then_send') : 'send')
       const skipped = { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
       if (answer === 'Cancel') {
         $.ui.log('Token Report: not sent, the cache is cold (' + cold + '). Your message stays; send again to go ahead.')
@@ -761,6 +857,7 @@ export const register: Register = on => {
         resendFocus = hasSummary ? '' : text
         // After this (skipped) turn has ended; a refusal is tried again at the next quiet moment
         isCompactOwed = true
+        isOwedByUser = true
         compactLater($, resendFocus)
         return skipped
       }
@@ -774,6 +871,7 @@ export const register: Register = on => {
       if (cold) {
         const answer = await $.ui.ask('Your chat went cold while it waited. Going on reloads all ' + cold + '. Go on now?', { header: 'Cold cache', options: ['Send anyway', 'Cancel'] })
           .catch(async () => ((await $.session.surfaces().catch(() => [])).length ? 'Cancel' : 'Send anyway'))
+        void logCold($, answer === 'Cancel' ? 'cancel' : 'send')
         if (answer === 'Cancel') {
           $.ui.log('Token Report: stopped before going on, the cache is cold (' + cold + '). Your answer stays in the chat; send any message to go on.')
           return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
@@ -848,6 +946,22 @@ export const register: Register = on => {
       const t = L.turns[e.turnId]
       x.series = cap([...x.series, { at: now, turnId: e.turnId, ctx, usd: t ? t.usd + t.agentsUsd : 0, rewrite: !!(t && t.rewrites) }], 400)
     }
+    // The event log: once per session what it runs on (after the first reply, when model and billing
+    // are known), then a row per plan limit that moved since the last one written
+    if (isEventLogOn()) try {
+      // You are back after a pause the Cache Warmer held: it stopped with your message
+      if (warm.pause !== lastPromptAt) logWarmStop($, 'message', lastPromptAt)
+      if (!isStartLogged && L.main.model) {
+        isStartLogged = true
+        const setting = (await read($, settingsA)).billing
+        const billing = detectBilling(setting, usage?.rateLimits, L.main.requests > 0).billing
+        void logEvent($, sid, 'session_start', now, { model: L.main.model, billing, billing_setting: setting, cache_ttl_min: mainTtlMin(billing, seenTtl), mod_version: modVersion })
+      }
+      const moved = limitRows(usage?.rateLimits, limitSeen)
+      limitSeen = moved.seen
+      for (const row of moved.rows) void logEvent($, sid, 'limit', now, row)
+      void sampleAppLimits($, now)
+    } catch {}
     await saveAll($)
     await bump($)
     $.ui.invalidate('ui.render')

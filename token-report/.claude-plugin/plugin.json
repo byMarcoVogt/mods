@@ -1,6 +1,6 @@
 {
   "name": "token-report",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "A band above the prompt with context size, cache clock, session cost and plan limits, plus a Settings pane for what happens to the cache and the context while you are away. For the Claude desktop app's Code tab.",
   "author": {
     "name": "Marco Vogt"
@@ -16,5 +16,13 @@
     "tokens",
     "context"
   ],
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "eventLogFolder": {
+      "type": "string",
+      "title": "Event log folder",
+      "description": "Empty: off. A folder (~ is your home folder): the mod adds one line per plan-limit change, compaction and Cache Warmer ping to events-YYYY-MM.jsonl there, for a dashboard to read. Ids and numbers only.",
+      "default": ""
+    }
+  }
 }
