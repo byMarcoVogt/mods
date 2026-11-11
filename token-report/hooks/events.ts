@@ -104,13 +104,48 @@ export function limitRows(limits: unknown, seen: Record<string, string>, source:
     if (!name || !num(l.percentUsed)) continue
     const at = typeof l.resetsAt === 'string' ? Date.parse(l.resetsAt) : NaN
     const resetsAt = num(at) ? new Date(Math.round(at / 60_000) * 60_000).toISOString() : null
-    const key = source === 'engine' ? name : source + ':' + name
+    const key = limitKey(name, source)
     const sig = l.percentUsed + '|' + (resetsAt ?? '')
     if (next[key] === sig) continue
     next[key] = sig
     rows.push({ limit: name, percent_used: l.percentUsed, resets_at: resetsAt, source })
   }
   return { rows, seen: next }
+}
+
+export const limitKey = (name: string, source: 'engine' | 'app') => (source === 'engine' ? name : source + ':' + name)
+
+// ---- early resets -----------------------------------------------------------------------------------
+// A window whose percent fell although its last known reset time is still ahead: someone reset the
+// limit early (a plan action in the Claude app). One `limit_reset` row per window and source for such
+// a drop, besides the normal `limit` row. Compared with what limitRows last wrote (`seen`, before it is
+// updated), so the same drop is never written twice by this session, also across reloads (seen is
+// stored). `noted` is shared by all sessions ($.store): a drop another session noted after this
+// session's last reading of that window (`seenAt`) is the same reset and writes nothing here.
+// Not a reset: the ordinary roll-over at the reset time (within RESET_MARGIN_MS of it, the reset time
+// being rounded to the minute) and a fall of one point with the reset time unchanged (rounding wobble).
+export type ResetNote = Record<string, { from: string; at: number }>
+export const RESET_MARGIN_MS = 5 * 60_000
+export function resetRows(limits: unknown, seen: Record<string, string>, seenAt: Record<string, number>, noted: ResetNote, now: number, source: 'engine' | 'app' = 'engine'): { rows: Row[]; noted: ResetNote } {
+  const rows: Row[] = []
+  const next = { ...noted }
+  for (const l of Array.isArray(limits) ? limits : []) {
+    const name = l && (typeof l.kind === 'string' ? l.kind : typeof l.label === 'string' ? l.label : '')
+    if (!name || !num(l.percentUsed)) continue
+    const key = limitKey(name, source)
+    const [p, from] = (seen[key] ?? '').split('|')
+    const before = p ? Number(p) : NaN
+    const fromMs = from ? Date.parse(from) : NaN
+    if (!num(before) || !num(fromMs) || fromMs - now <= RESET_MARGIN_MS || l.percentUsed >= before) continue
+    const at = typeof l.resetsAt === 'string' ? Date.parse(l.resetsAt) : NaN
+    const to = num(at) ? new Date(Math.round(at / 60_000) * 60_000).toISOString() : null
+    if (before - l.percentUsed < 2 && to === from) continue
+    const n = next[key]
+    if (n && n.from === from && n.at >= (seenAt[key] ?? 0)) continue
+    next[key] = { from, at: now }
+    rows.push({ limit: name, percent_before: before, percent_after: l.percentUsed, resets_at_before: from, resets_at_after: to, source })
+  }
+  return { rows, noted: next }
 }
 
 // What the desktop app's usage tool (mcp__ccd_session_mgmt__get_usage) answered, as a mod's

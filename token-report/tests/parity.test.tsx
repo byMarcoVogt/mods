@@ -12,8 +12,8 @@ const STATES: Record<string, { tokens: number; target?: number; minutes: number 
   threshold: { tokens: 180_000, target: 100_000, minutes: 1 },
 }
 
-// The reset time is local, so any time zone gives the same text
-const local = (text: string) => text.replace(/\(\d\d:\d\d\)/g, '(HH:MM)')
+// The reset time and the limits' "as of" time are local, so any time zone gives the same text
+const local = (text: string) => text.replace(/\(\d\d:\d\d\)/g, '(HH:MM)').replace(/as of \d\d:\d\d/g, 'as of HH:MM')
 
 async function draw($: any, on: any, name: string) {
   const st = STATES[name]!

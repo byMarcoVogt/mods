@@ -6,7 +6,7 @@ import type { Settings } from '../types'
 import type { Tree } from './agents'
 import type { Billing, Ledger } from './ledger'
 import type { ProfileView } from './profile'
-import type { LineState, UsageView } from './line'
+import type { BandLimits, LineState, UsageView } from './line'
 
 type Desktop = ElementTable<'desktop'>
 
@@ -19,6 +19,8 @@ export type Data = {
   L: Ledger
   s: LineState
   usage: UsageView
+  // The 5-hour and weekly reading the band shows: the newer of the engine's and the app's (line.tsx bandLimits)
+  limits: BandLimits
   // Context window, Claude Code's auto-compact point, and the threshold in force (tokens)
   window: number | null
   compactAt: number | null
