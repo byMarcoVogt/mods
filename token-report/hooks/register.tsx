@@ -6,13 +6,18 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Settings, UiState } from '../types'
-import { isEventLogOn, limitRows, logEvent, planOf, startEventLog, usd6 } from './events'
+import { eventsIdle, isEventLogOn, limitRows, logEvent, planOf, startEventLog, usd6 } from './events'
 import { C, k, money, num, type Act, type Data, type PageCtx, type UI } from './kit'
 import {
   addRequest, clockLeft, detectBilling, mainTtlMin, newLedger, noteAgentEnd, noteAgentStart,
   priceFor, promptOf, restore, rewriteUsd, snapshot, toUsage, EUR_PER_USD,
 } from './ledger'
 import type { Ledger, Ttl, Usage } from './ledger'
+import {
+  amountMatters, answerOf, classifyStart, forkCarryUsd, forkGuardFires, handBackAgent, handBackFork, handBackModel,
+  isExpensive, jobKey, noteExplicit, ratioTo, roundTripUsd, samePrice, savingUsd, startResult, toolKind, SUGGESTED,
+  type Answer, type Cls, type Signal,
+} from './router'
 import { ctxTokens, drawLine, warnMinutes, type LineState, type UsageView } from './line'
 import { drawShell } from './shell'
 
@@ -23,6 +28,7 @@ const DAY = 86_400_000
 
 export const DEFAULT_SETTINGS: Settings = {
   billing: 'auto', contextTarget: 400_000, atTarget: 'remind', unattended: 'count',
+  agentStarts: 'count', sessionStarts: 'count',
   away: 'keep', keepWarm: '1h', compactNote: '', coldAsk: '0.5',
   currency: 'usd', eurRate: EUR_PER_USD,
 }
@@ -31,6 +37,8 @@ const ALLOWED: { [K in keyof Settings]?: readonly string[] } = {
   billing: ['auto', 'subscription', 'api'],
   atTarget: ['off', 'remind', 'ask', 'compact'],
   unattended: ['count', 'act'],
+  agentStarts: ['count', 'act'],
+  sessionStarts: ['count', 'act'],
   away: ['compact', 'keep', 'warm-compact', 'warm-keep'],
   keepWarm: ['15m', '30m', '45m', '1h', '2h', '5h'],
   coldAsk: ['off', '0.25', '0.5', '1', 'any'],
@@ -133,6 +141,34 @@ let childCheck: Promise<void> | undefined
 let isChildBrief = false
 // Main-thread AskUserQuestion calls waiting on your answer: the turn runs, but nothing is sent meanwhile
 let waitingAsks = 0
+// ---- agent and session starts (settings `agentStarts`, `sessionStarts`; plan/v2-slice2-router.md) ----
+// The note for an expensive model named on purpose rides on the Agent tool's result as `context`. Off
+// switches it to counting only: live check L2 shows whether the model reads it on the desktop app.
+const NOTE_VIA_CONTEXT = true
+// The session tools the fork guard and model-at-start watch (hand_off raising tool.call: live check L4)
+const START_SESSION = 'mcp__ccd_session__start_session'
+const HAND_OFF = 'mcp__ccd_session__hand_off_to_session'
+// After this many re-issues on the expensive model the caller has said no: no more hand-backs this session
+const MAX_INSISTS = 3
+type About = 'agent' | 'session_model' | 'session_fork'
+// A hand-back waiting for the caller's next start of the same job in the same loop ('main' or an agent id)
+type Pending = { id: string; job: string; loop: string; about: About; parent: string }
+let pending: Pending[] = []
+// Jobs handed back once in this session (agents by job, session starts as 's:' + job): never again
+let handedBack = new Set<string>()
+let insists = 0
+// The explicit-choice note is given once per session; the Agent calls that carry it, by tool_use_id
+let isNoted = false
+const noteFor = new Map<string, string>()
+// The effort an Agent call gave (agent.spawn has none), by tool_use_id
+const effortOf = new Map<string, string>()
+// What an agent type with no model named resolved to, learned from its starts: inherits or not
+let typeModel: Record<string, string> = {}
+// CLAUDE_CODE_SUBAGENT_MODEL, read once at session start: then no omitted model inherits ('' = unset)
+let subagentModel = ''
+// The main thread's model as its last request named it
+let mainModel = ''
+
 // A failed ping waits a minute before the next try (else every 15 s tick tried again)
 let pingFailedAt = 0
 const PING_RETRY_MS = 60_000
@@ -285,6 +321,14 @@ async function openSession($: EngineInterface, id: string, now: number) {
     isChildBrief = false
     lastSummary = null
     pingFailedAt = 0
+    pending = []
+    handedBack = new Set()
+    insists = 0
+    isNoted = false
+    noteFor.clear()
+    effortOf.clear()
+    typeModel = {}
+    mainModel = ''
   }
   const ls = (await $.store.get('session:' + sid)) as LineState | undefined
   s = ls && Array.isArray(ls.growth) ? { ...freshLine(), ...ls } : freshLine()
@@ -792,6 +836,133 @@ async function closePane($: EngineInterface) {
   await $.ui.close({ id: PANE })
 }
 
+// ---- agent and session starts ------------------------------------------------------------------------
+// A start's lines are written before its hook returns: a write still pending once the hook's frame has
+// ended is lost (the deny path returns at once). Only while the event log is on.
+const logged = () => (isEventLogOn() ? eventsIdle() : Promise.resolve())
+// The calling loop's context and cache: the main thread's, or a subagent's (its last request). Mid-turn
+// the cache is warm; a start from a turn that woke a cold one finds it cold.
+async function callerState($: EngineInterface, agentId: string | undefined, now: number) {
+  let last: { startedAt: number; usage: Usage } | undefined
+  for (let i = L.requests.length - 1; i >= 0 && !last; i--) if ((L.requests[i]!.agentId || undefined) === agentId) last = L.requests[i]
+  const settings = await read($, settingsA)
+  const ttlMin = agentId ? SUB_TTL_MIN : mainTtlMin(detectBilling(settings.billing, usage?.rateLimits, L.main.requests > 0).billing, seenTtl)
+  const tokens = last ? promptOf(last.usage) : agentId ? null : ctxTokens(usage)
+  const left = last ? clockLeft(last.startedAt, ttlMin, now) : null
+  return { tokens: num(tokens) ? tokens : null, isCold: left !== null && left <= 0, ttlMin }
+}
+
+// Does a start with no model named run on its parent's model? An agent definition or
+// CLAUDE_CODE_SUBAGENT_MODEL may set one; null: not known yet (a type not seen before)
+function inheritsOf(type: string, named: string, parent: string, isFork: boolean): boolean | null {
+  if (isFork) return true
+  if (named || subagentModel) return false
+  if (type === 'general-purpose') return true
+  const seen = typeModel[type]
+  return seen === undefined ? null : samePrice(seen, parent)
+}
+
+// The caller's next start answered a hand-back (or none came before its loop ended: dropped)
+function logAnswer($: EngineInterface, p: Pending, answer: Answer, at: number, fields: { agent_id?: string | null; child?: string | null; model?: string | null } = {}) {
+  pending = pending.filter(q => q !== p)
+  if (answer === 'same_model' || answer === 'other_model' || answer === 'fork_again') insists += 1
+  void logEvent($, sid, 'hand_back_answer', at, {
+    hand_back_id: p.id, answer, agent_id: fields.agent_id ?? null, child: fields.child ?? null, model: fields.model ?? null,
+  })
+}
+
+type AgentPlan = {
+  cls: Cls; signal: Signal; job: string; loop: string; inherits: boolean | null; tokens: number | null; isCold: boolean
+  would: 'none' | 'hand_back' | 'note' | 'unknown'; saving: number | null; roundTrip: number | null; answering: Pending | undefined
+}
+// What the rules say about an agent start, under either setting (count logs it as `would`)
+async function planAgent($: EngineInterface, e: { subagentType: string; description: string; prompt: string; model?: string; parentModel: string; parentAgentId?: string; fork: boolean; workflow?: unknown; resume?: unknown; isTeammate?: true }, now: number): Promise<AgentPlan> {
+  const c = classifyStart(e.subagentType, e.description, e.prompt)
+  const job = jobKey(e.prompt)
+  const loop = e.parentAgentId || 'main'
+  const named = e.model || ''
+  const inherits = inheritsOf(e.subagentType || 'general-purpose', named, e.parentModel, e.fork)
+  const answering = pending.find(p => p.about === 'agent' && p.job === job && p.loop === loop)
+  const st = await callerState($, e.parentAgentId, now)
+  const out: AgentPlan = { ...c, job, loop, inherits, tokens: st.tokens, isCold: st.isCold, would: 'none', saving: null, roundTrip: null, answering }
+  // Workflow, resume, teammate and agent forks: counted only (a deny breaks a script, parks an agent;
+  // a fork's model can't change)
+  if (e.workflow || e.resume || e.isTeammate || e.fork || c.cls !== 'gather') return out
+  if (named) return { ...out, would: isExpensive(named) ? 'note' : 'none' }
+  if (!isExpensive(e.parentModel)) return out
+  if (inherits === null) return { ...out, would: 'unknown' }
+  if (!inherits || answering || handedBack.has(job) || insists >= MAX_INSISTS) return out
+  const saving = savingUsd(e.parentModel)
+  const roundTrip = st.tokens === null ? null : roundTripUsd(st.tokens, e.parentModel, st.isCold, st.ttlMin)
+  const isWorth = st.tokens === null || amountMatters(st.tokens, e.parentModel, st.isCold, st.ttlMin)
+  return { ...out, saving, roundTrip, would: isWorth ? 'hand_back' : 'none' }
+}
+
+// A subagent ended: what it spent and which tools it used (agent_end), for the dashboard's plan against
+// actual and for measuring the rule against what agents really did
+function logAgentEnd($: EngineInterface, id: string, at: number) {
+  const a = L.agents[id]
+  if (!a || !isEventLogOn()) return
+  const u = { input: 0, output: 0, cache_read: 0, cache_write: 0 }
+  const tools = { web: 0, browser: 0, read: 0, write: 0, other: 0 }
+  for (const r of L.requests) {
+    if (r.agentId !== id) continue
+    u.input += r.usage.input; u.output += r.usage.output; u.cache_read += r.usage.cacheRead; u.cache_write += r.usage.cacheWrite
+    for (const t of r.tools) tools[toolKind(t)] += 1
+  }
+  void logEvent($, sid, 'agent_end', at, {
+    agent_id: id, model: a.model || null, requests: a.requests, usd: usd6(a.usd), ...u,
+    tools_web: tools.web, tools_browser: tools.browser, tools_read: tools.read, tools_write: tools.write, tools_other: tools.other,
+    duration_ms: a.startedAt ? Math.max(0, at - a.startedAt) : null,
+  })
+}
+
+// A new session from this one (spec § 4): the fork guard, then model-at-start. Under act one hand-back
+// per call at most; a call repeating a handed-back brief, naming a model or saying fresh passes
+async function sessionTool(tool: string, $: EngineInterface, e: Record<string, unknown> & { tool_use_id: string }, next: (e: unknown) => Promise<unknown>) {
+  const now = await $.clock.now()
+  const settings = await read($, settingsA)
+  const isHandOff = tool === HAND_OFF
+  const context = isHandOff ? 'fork' : e.context === 'fork' ? 'fork' : 'fresh'
+  const named = typeof e.model === 'string' ? e.model : ''
+  const job = jobKey(String(e.prompt ?? e.remaining_plan ?? e.title ?? ''))
+  const parent = mainModel || L.main.model || ''
+  const st = await callerState($, undefined, now).catch(() => ({ tokens: null as number | null, isCold: false, ttlMin: 60 }))
+  const answering = pending.find(p => p.about !== 'agent' && p.job === job && p.loop === 'main')
+  let about: About | null = null
+  if (parent && !answering && !handedBack.has('s:' + job) && insists < MAX_INSISTS) {
+    if (context === 'fork') { if (st.tokens !== null && forkGuardFires(st.tokens, parent, st.isCold)) about = 'session_fork' }
+    else if (!named && isExpensive(parent)) about = 'session_model'
+  }
+  const isAct = settings.sessionStarts === 'act'
+  const line = {
+    tool: isHandOff ? 'hand_off' : 'start_session', tool_use_id: e.tool_use_id, initiation: typeof e.initiation === 'string' ? e.initiation : null,
+    context, model_named: named || null, effort_named: typeof e.effort === 'string' ? e.effort : null, parent_model: parent || null,
+    parent_tokens: st.tokens, cold: st.isCold, job, setting: settings.sessionStarts, would: about ? 'hand_back' : 'none',
+  }
+  if (about && isAct) {
+    handedBack.add('s:' + job)
+    pending.push({ id: e.tool_use_id, job, loop: 'main', about, parent })
+    void logEvent($, sid, 'hand_back', now, {
+      tool_use_id: e.tool_use_id, about, job, cls: null, parent_model: parent, parent_tokens: st.tokens, cold: st.isCold,
+      suggested: about === 'session_fork' ? 'fresh' : SUGGESTED, ratio: about === 'session_model' ? ratioTo(parent) : null,
+      carry_usd: about === 'session_fork' && st.tokens !== null ? usd6(forkCarryUsd(st.tokens, parent)) : null,
+    })
+    void logEvent($, sid, 'side_start', now, { ...line, action: 'hand_back', result: 'denied', child: null })
+    await logged()
+    return { deny: about === 'session_fork' ? handBackFork(st.tokens ?? 0, parent, isHandOff) : handBackModel(parent) }
+  }
+  const r = await next(e)
+  const res = startResult(r)
+  void logEvent($, sid, 'side_start', now, { ...line, action: answering ? 'passed_after_hand_back' : 'none', result: res.result, child: res.child })
+  if (answering) {
+    const answer: Answer = answering.about === 'session_fork' ? (context === 'fork' ? 'fork_again' : 'fresh') : answerOf(named, answering.parent)
+    logAnswer($, answering, answer, now, { child: res.child, model: named || null })
+  }
+  await logged()
+  return r
+}
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     startEventLog(options?.eventLogFolder)
@@ -802,6 +973,8 @@ export const register: Register = (on, options) => {
       await openSession($, String(await $.session.id()), now)
       try { globalSettings = validSettings(await $.store.get('settings')) } catch {}
       try { cwd = await $.session.cwd() } catch {}
+      // A subagent model set for the whole session: then no omitted model inherits the parent's
+      try { subagentModel = String((await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL')) || '') } catch { subagentModel = '' }
       // Where Claude Code's idle compaction starts (its env var, floor 100k), or null when it is off
       try {
         const isOff = (await $.settings.read({ key: 'idleCompaction' })) === false
@@ -1063,6 +1236,7 @@ export const register: Register = (on, options) => {
       const model = (res.usage as { model?: string }).model || e.model
       const tools = (res.toolUses || []).map(t => t.name)
       if (!e.agentId && e.index === 0) firstTokens = promptOf(toUsage(res.usage))
+      if (!e.agentId && model) mainModel = model
       const billing = detectBilling((await read($, settingsA)).billing, usage?.rateLimits, true)
       addRequest(L, { turnId: e.turnId, index: e.index, agentId: e.agentId || null, model, effort: e.effort, startedAt, endedAt, usage: toUsage(res.usage), tools }, mainTtlMin(billing.billing, seenTtl), SUB_TTL_MIN)
       await bump($)
@@ -1081,24 +1255,85 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // An Agent call: its effort (agent.spawn has none) and, once it has run, the note for an expensive model
+  // named on purpose (decision 1), in the result's `context`, which the model reads after the result
+  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    const id = e.tool_use_id
+    if (typeof e.effort === 'string') effortOf.set(id, e.effort)
+    try {
+      const r = await next(e)
+      const note = noteFor.get(id)
+      if (note && NOTE_VIA_CONTEXT && r && !r.deny && !r.isError) return { ...r, context: [...(r.context ?? []), note] }
+      return r
+    } finally {
+      noteFor.delete(id)
+      effortOf.delete(id)
+    }
+  })
+
+  // Every agent start, before it runs (spec § 4). Under act a research or gathering agent that would
+  // inherit an expensive parent's model goes back to the caller once, with the reason; nothing else is
+  // ever refused. Both settings write what act would do.
   on('agent.spawn', async ($, e, next) => {
+    const now = await $.clock.now()
+    const settings = await read($, settingsA)
+    const plan = await planAgent($, e, now).catch(() => null)
+    const isAct = settings.agentStarts === 'act'
+    if (plan && isAct && plan.would === 'hand_back') {
+      handedBack.add(plan.job)
+      pending.push({ id: e.tool_use_id, job: plan.job, loop: plan.loop, about: 'agent', parent: e.parentModel })
+      void logEvent($, sid, 'hand_back', now, {
+        tool_use_id: e.tool_use_id, about: 'agent', job: plan.job, cls: plan.cls, parent_model: e.parentModel, parent_tokens: plan.tokens,
+        cold: plan.isCold, suggested: SUGGESTED, ratio: ratioTo(e.parentModel),
+        est_saving_usd: plan.saving === null ? null : usd6(plan.saving), round_trip_usd: plan.roundTrip === null ? null : usd6(plan.roundTrip),
+      })
+      await logged()
+      return { deny: handBackAgent(plan.signal, e.parentModel) }
+    }
     const r = await next(e)
     const id = r && (r as { agentId?: string }).agentId
     if (id) {
+      const model = (r as { model: string }).model
+      const type = e.subagentType || 'general-purpose'
       noteAgentStart(L, id, {
-        description: e.description, type: e.subagentType || 'general-purpose', model: (r as { model: string }).model,
-        toolUseId: e.tool_use_id, workflow: !!e.workflow, at: await $.clock.now(),
+        description: e.description, type, model, effort: effortOf.get(e.tool_use_id),
+        toolUseId: e.tool_use_id, workflow: !!e.workflow, at: now,
       })
+      // What a type with no model named resolves to: next time it is known whether it inherits
+      if (!e.model && !e.fork && model) typeModel[type] = model
+      if (plan) {
+        const isNote = isAct && plan.would === 'note' && !isNoted
+        if (isNote) {
+          isNoted = true
+          noteFor.set(e.tool_use_id, noteExplicit(e.model || model))
+        }
+        void logEvent($, sid, 'agent_start', now, {
+          agent_id: id, tool_use_id: e.tool_use_id, parent_agent_id: e.parentAgentId ?? null, type, cls: plan.cls, signal: plan.signal,
+          job: plan.job, model, model_named: e.model ?? null, parent_model: e.parentModel, inherits: plan.inherits,
+          effort: effortOf.get(e.tool_use_id) ?? null, fork: e.fork, background: e.background, workflow: !!e.workflow,
+          parent_tokens: plan.tokens, setting: settings.agentStarts,
+          action: plan.answering ? 'after_hand_back' : isNote ? 'noted' : 'none', would: plan.would,
+        })
+        if (plan.answering) logAnswer($, plan.answering, answerOf(e.model || '', plan.answering.parent), now, { agent_id: id, model })
+      }
       await bump($)
     }
+    await logged()
     return r
   })
 
+  on('tool.call', { tool: 'mcp__ccd_session__start_session' } as never, async ($, e, next) => sessionTool(START_SESSION, $, e as never, next as never) as never)
+  on('tool.call', { tool: 'mcp__ccd_session__hand_off_to_session' } as never, async ($, e, next) => sessionTool(HAND_OFF, $, e as never, next as never) as never)
+
   on('turn.complete', async ($, e, next) => {
     const now = await $.clock.now()
+    // A hand-back the caller did not answer before its loop ended
+    for (const p of pending.filter(q => q.loop === (e.agentId || 'main'))) logAnswer($, p, 'dropped', now)
     if (e.agentId) {
       noteAgentEnd(L, e.agentId, now)
+      logAgentEnd($, e.agentId, now)
       await saveAll($)
+      await logged()
       return next(e)
     }
     isWorking = false
