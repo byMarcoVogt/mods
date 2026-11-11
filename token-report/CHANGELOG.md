@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0 (2026-11-10)
+
+- An event log, off by default. Set the mod's option "Event log folder" to a folder, and the mod adds one JSON line per event to `events-YYYY-MM.jsonl` there, for a dashboard or your own scripts to read: session start, plan-limit changes, compactions, the cold-send dialog and its choice, Cache Warmer start, pings and stop. Ids and numbers only, no prompt text. Left empty, the mod reads and writes nothing for it.
+- Plan limits in the log also come from the desktop app's usage card when the mod may ask for it, which adds the per-model weekly windows.
+
 ## 1.1.1 (2026-11-10)
 
 - A turn that resumes on a cold cache asks too, for example when you answer a question from Claude an hour later: Send anyway or Cancel. Before, only the first request of your own message was checked.

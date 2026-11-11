@@ -16,7 +16,7 @@ export const api = (cr: number, cw: number, model: string, input = 2, output = 3
 export function setup($: any, on: any, start = 1_000_000) {
   const clock = mock.clock(on, { now: start })
   const store: Record<string, unknown> = {}
-  const env = { tokens: 180_000 as number | undefined, cost: 1, opened: [] as string[], toasts: [] as string[] }
+  const env = { tokens: 180_000 as number | undefined, cost: 1, opened: [] as string[], toasts: [] as string[], limits: undefined as unknown[] | undefined }
   on('store.get', async (_$: unknown, e: { key: string }) => ({ value: store[e.key] }))
   on('store.set', async (_$: unknown, e: { key: string; value: unknown }) => { store[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
   on('store.delete', async (_$: unknown, e: { key: string }) => { delete store[e.key]; return { value: undefined } })
@@ -26,7 +26,7 @@ export function setup($: any, on: any, start = 1_000_000) {
     value: {
       startedAt: start - 42 * 60_000,
       context: { tokens: env.tokens },
-      rateLimits: [{ kind: 'five_hour', percentUsed: 40, resetsAt: new Date(start + 3 * 3_600_000).toISOString() }, { kind: 'seven_day', percentUsed: 81, resetsAt: new Date(start + 50 * 3_600_000).toISOString() }],
+      rateLimits: env.limits ?? [{ kind: 'five_hour', percentUsed: 40, resetsAt: new Date(start + 3 * 3_600_000).toISOString() }, { kind: 'seven_day', percentUsed: 81, resetsAt: new Date(start + 50 * 3_600_000).toISOString() }],
       cost: { usd: env.cost },
     },
   }))
