@@ -22,7 +22,7 @@ const SUB_TTL_MIN = 5
 const DAY = 86_400_000
 
 export const DEFAULT_SETTINGS: Settings = {
-  billing: 'auto', contextTarget: 400_000, atTarget: 'remind',
+  billing: 'auto', contextTarget: 400_000, atTarget: 'remind', unattended: 'count',
   away: 'keep', keepWarm: '1h', compactNote: '', coldAsk: '0.5',
   currency: 'usd', eurRate: EUR_PER_USD,
 }
@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS: Settings = {
 const ALLOWED: { [K in keyof Settings]?: readonly string[] } = {
   billing: ['auto', 'subscription', 'api'],
   atTarget: ['off', 'remind', 'ask', 'compact'],
+  unattended: ['count', 'act'],
   away: ['compact', 'keep', 'warm-compact', 'warm-keep'],
   keepWarm: ['15m', '30m', '45m', '1h', '2h', '5h'],
   coldAsk: ['off', '0.25', '0.5', '1', 'any'],
@@ -106,6 +107,30 @@ const WARM_NOTICE_MS = 10 * 60_000
 let askCold = ''
 // The running main turn came from no person: nobody would answer a cold dialog in the middle of it
 let isTurnAuto = false
+// ---- turns nobody typed (setting `unattended`) -------------------------------------------------------
+// Compact-first's form, for a turn nobody typed that wakes a cold cache. 'skip-turn' (built, safe): the
+// turn's first request is skipped, the mod compacts after that turn, then sends the text again framed.
+// 'hold-prompt': hold the prompt in prompt.submit, compact, then let it through. Switch to it only once
+// live check S1 shows Claude Code runs a /compact from there instead of refusing it.
+const COMPACT_FIRST: 'skip-turn' | 'hold-prompt' = 'skip-turn'
+type WakeAction = 'none' | 'compact_after' | 'use_summary' | 'compact_first' | 'sent_cold'
+// One turn nobody typed: where it came from, the cache as it found it, what Act does about a cold cache
+// (`b`), whether Act is on, and what the mod did before the turn's first request
+type Wake = { origin: string; at: number; tokens: number | null; cold: boolean; reloadUsd: number | null; b: WakeAction; act: boolean; did: WakeAction }
+// The next turn's (set at prompt.submit) and the running turn's
+let nextWake: Wake | null = null
+let wake: Wake | null = null
+// The context the running main turn's first request read
+let firstTokens: number | null = null
+// A peer's or notification's text compact-first holds back: it goes again after the compaction, framed
+// as the mod's message, never as your own words (asUser), with its wrapper as it came
+let resendFramed = ''
+// When Claude Code last put in a summary it wrote ahead (trigger auto)
+let autoSummaryAt = 0
+// A started child's first turn: its brief came from the parent session (get_session("self"), asked
+// once, lazily at the first request; undefined: not asked). The answer: yes, until that turn has ended
+let childCheck: Promise<void> | undefined
+let isChildBrief = false
 // Main-thread AskUserQuestion calls waiting on your answer: the turn runs, but nothing is sent meanwhile
 let waitingAsks = 0
 // A failed ping waits a minute before the next try (else every 15 s tick tried again)
@@ -148,10 +173,13 @@ let resendFocus = ''
 let limitSeen: Record<string, string> = {}
 let isStartLogged = false
 let modVersion = ''
-let modCompact: { isByUser: boolean; at: number } | null = null
+type Cause = 'threshold' | 'cold_send' | 'away' | 'wake' | 'button'
+let modCompact: { isByUser: boolean; at: number; cause: Cause } | null = null
 const MOD_COMPACT_MS = 10 * 60_000
 // The compaction owed was asked for by you (the cold-send dialog), not by a rule
 let isOwedByUser = false
+// Why the compaction owed is owed (the event log's `cause`)
+let owedCause: Cause = 'threshold'
 // Counts session switches: work started on the clock for one chat never lands in the next
 let gen = 0
 const later = ($: EngineInterface, ms: number, fn: () => unknown) => {
@@ -159,11 +187,11 @@ const later = ($: EngineInterface, ms: number, fn: () => unknown) => {
   $.clock.after(ms, async () => { if (gen === at) await fn() })
 }
 // A compaction started on the clock runs only if one is still owed: another path may have done it meanwhile
-const compactLater = ($: EngineInterface, focus = '') => later($, 1500, () => isCompactOwed && startCompact($, focus))
+const compactLater = ($: EngineInterface, focus = '') => later($, 1500, () => isCompactOwed && startCompact($, focus, false, owedCause))
 // A compaction the mod asks for, noted for the event log (who asked, when) before compactNow runs it.
 // The note stands until a compaction lands or 10 minutes pass: a refused one is tried again later.
-async function startCompact($: EngineInterface, focus = '', isByUser = false) {
-  if (!isCompacting) modCompact = { isByUser: isByUser || (isCompactOwed && isOwedByUser), at: await $.clock.now().catch(() => 0) }
+async function startCompact($: EngineInterface, focus = '', isByUser = false, cause: Cause = 'threshold') {
+  if (!isCompacting) modCompact = { isByUser: isByUser || (isCompactOwed && isOwedByUser), at: await $.clock.now().catch(() => 0), cause }
   return compactNow($, focus)
 }
 // The event log's rows for what the mod does to prevent cost. The Cache Warmer per pause (a pause starts
@@ -249,6 +277,12 @@ async function openSession($: EngineInterface, id: string, now: number) {
     modCompact = null
     appLimits = 'ask'
     isNextTurnAuto = false
+    nextWake = null
+    wake = null
+    resendFramed = ''
+    autoSummaryAt = 0
+    childCheck = undefined
+    isChildBrief = false
     lastSummary = null
     pingFailedAt = 0
   }
@@ -426,21 +460,27 @@ async function afterCompaction($: EngineInterface, r: { tokensBefore?: number; t
   if (num(after)) lastSummary = after
   // The engine reports the sizes only when it compacted itself; else the size the band last showed
   const before = num(r.tokensBefore) ? r.tokensBefore : sizeBefore
+  let cause: Cause | null = null
   // The event log: who ran it and whether a person asked for it. One the mod asked for shortly before
   // is the mod's, also when it ran as Claude Code's /compact (the desktop app's way), and so is one that
   // lands while the mod still owes one (a refused compaction waits, queued, for the turn to end).
   try {
     const now = await $.clock.now()
-    const mine = modCompact && now - modCompact.at < MOD_COMPACT_MS ? modCompact : isCompactOwed ? { isByUser: isOwedByUser } : null
+    const mine = modCompact && now - modCompact.at < MOD_COMPACT_MS ? modCompact : isCompactOwed ? { isByUser: isOwedByUser, cause: owedCause } : null
+    cause = mine ? mine.cause : null
     modCompact = null
+    if (trigger === 'auto') autoSummaryAt = now
+    const cu = (r as { usage?: unknown }).usage
     void logEvent($, sid, 'compact', now, {
       tokens_before: num(before) ? before : null, tokens_after: num(after) ? after : null,
       by: mine || trigger === undefined || trigger === 'plugin' ? 'token_report' : 'claude_code',
       automatic: mine ? !mine.isByUser : trigger !== 'manual',
       trigger: trigger ?? 'plugin', context_target: (await read($, settingsA)).contextTarget,
+      cause, usd: cu ? usd6(usdFor(toUsage(cu), L.main.model)) : null,
     })
   } catch {}
-  if (num(before)) $.ui.toast('Compacted ' + k(before) + (num(after) ? ' → ' + k(after) : ''))
+  if (num(before)) $.ui.toast('Compacted ' + k(before) + (num(after) ? ' → ' + k(after) : '') + (cause === 'wake' ? ' (turn nobody typed)' : ''))
+  sendFramed($, 500)
   if (resendText) {
     const text = resendText
     resendText = ''
@@ -463,6 +503,16 @@ async function afterCompaction($: EngineInterface, r: { tokensBefore?: number; t
   $.ui.invalidate('ui.render')
 }
 
+// The text compact-first held back goes again: framed as this mod's message (no asUser), so the model
+// never reads a peer's or a notification's words as yours. Also when the compaction failed or was
+// skipped: a message nobody typed is never lost, it then simply goes on the cold cache.
+function sendFramed($: EngineInterface, ms: number) {
+  if (!resendFramed) return
+  const text = resendFramed
+  resendFramed = ''
+  later($, ms, () => $.prompt.submit({ text }).catch(err => $.ui.toast('Token Report: could not deliver a message again (' + String(err) + ')')))
+}
+
 // Claude Code's own compaction, the same call /compact makes. Settings' compact instructions go with
 // it, plus `focus` (the message the cold-send dialog sends again).
 async function compactNow($: EngineInterface, focus = '') {
@@ -480,6 +530,7 @@ async function compactNow($: EngineInterface, focus = '') {
       isCompactOwed = false
       resendText = ''
       $.ui.toast('Compaction skipped: ' + out.skip + (focus ? '. Your message was not sent again.' : ''))
+      sendFramed($, 0)
       return
     }
     if (!isCompactionSeen && out && typeof out === 'object') await afterCompaction($, out as { tokensBefore?: number; tokensAfter?: number }, sizeBefore)
@@ -514,37 +565,56 @@ function refused($: EngineInterface, err: unknown, focus: string) {
   isCompactOwed = false
   $.ui.toast('Compaction failed: ' + String(err) + (focus || resendText ? '. Your message was not sent again.' : ''))
   resendText = ''
+  sendFramed($, 0)
 }
 
 // Context management, checked after each main turn. Once a turn crosses the threshold, and again at
 // every further 100k: Reminder pops up (Compact stays in the band), Ask opens a dialog, Compact compacts.
 // Right after the turn the cache is warm, so compacting is cheap then. No pop-ups below the threshold:
-// the band's colour already turns orange and red.
-async function checkTarget($: EngineInterface) {
+// the band's colour already turns orange and red. After a turn nobody typed (`isAuto`) nobody is there
+// to answer: Ask pops up like Reminder, and under Act (`wk.act`) the mod compacts whatever Reminder or
+// Ask say, after every such turn above the threshold. Returns whether the context ended above the
+// threshold, whether a compaction is now on its way, and whether Act would start one (the event log).
+async function checkTarget($: EngineInterface, isAuto = false, wk: Wake | null = null) {
   const settings = await read($, settingsA)
   const tokens = ctxTokens(usage)
   const target = thresholdOf(settings)
+  const out = { isAbove: !!target && num(tokens) && tokens >= target, did: false, would: false }
   // Off: the mod stays quiet; Claude Code's own limit still applies
-  if (!target || !num(tokens) || tokens < target || settings.atTarget === 'off') return
+  if (!out.isAbove || !num(tokens) || !target || settings.atTarget === 'off') return out
+  // A summary that would not shrink the chat much is not worth its cost: Compact acts as a Reminder then
+  const isWorthIt = !num(lastSummary) || tokens >= lastSummary * 1.5
+  // Compact-first already compacts after this turn
+  out.would = isWorthIt && wk?.did !== 'compact_first'
+  if (wk?.act && out.would) {
+    isCompactOwed = true
+    isOwedByUser = false
+    owedCause = 'wake'
+    compactLater($)
+    return { ...out, did: true }
+  }
   const step = Math.floor((tokens - target) / THRESHOLD_STEP)
   const id = 'threshold-' + target + '-' + s.compactions + '-' + step
   if (warned.has(id)) {
     // Still owed after a refusal: try again now this turn has ended
     if (isCompactOwed) compactLater($)
-    return
+    return out
   }
   warned.add(id)
   const above = 'Context: ' + k(tokens) + ', above your ' + k(target) + ' threshold'
-  // A summary that would not shrink the chat much is not worth its cost: Compact acts as a Reminder then
-  const isWorthIt = !num(lastSummary) || tokens >= lastSummary * 1.5
-  if (settings.atTarget === 'remind' || (settings.atTarget === 'compact' && !isWorthIt)) return void $.ui.toast(above)
+  if (settings.atTarget === 'remind' || (settings.atTarget === 'compact' && !isWorthIt) || (settings.atTarget === 'ask' && isAuto)) {
+    $.ui.toast(above)
+    return out
+  }
   if (settings.atTarget === 'compact') {
     $.ui.toast('Context: ' + k(tokens) + ' (compacting)')
     isCompactOwed = true
     isOwedByUser = false
-    return void compactLater($)
+    owedCause = 'threshold'
+    compactLater($)
+    return { ...out, did: true }
   }
-  if (stopAskingSid === sid || isAsking) return
+  if (stopAskingSid === sid || isAsking) return out
   // Ask: started on the clock, the answer may take longer than a hook's budget. One dialog at a time,
   // and none once your next turn has started
   later($, 1500, async () => {
@@ -552,23 +622,83 @@ async function checkTarget($: EngineInterface) {
     isAsking = true
     const answer = await $.ui.ask(above + '. Compact now? The cache is warm, so it is cheap now.', { header: 'Context', options: ['Compact', 'Not now', 'Stop asking (this session)'] }).catch(() => 'Not now')
     isAsking = false
-    if (answer === 'Compact') return startCompact($, '', true)
+    if (answer === 'Compact') return startCompact($, '', true, 'threshold')
     if (answer.startsWith('Stop asking')) stopAskingSid = sid
   })
+  return out
+}
+
+// The cache right now: cold or not, the size and price of what the next send reloads, and whether that
+// is above the amount in Settings ("Ask before a cold send")
+async function coldState($: EngineInterface) {
+  const settings = await read($, settingsA)
+  const d = await snapshotData($)
+  const size = d.s.compacted?.after ?? ctxTokens(d.usage)
+  const usd = d.rewriteUsd
+  const isCold = d.cacheLeft !== null && d.cacheLeft <= 0 && usd !== null
+  const at = settings.coldAsk
+  const rate = settings.currency === 'eur' ? settings.eurRate : 1
+  const isAbove = isCold && at !== 'off' && (at === 'any' || (usd as number) * rate >= Number(at))
+  return { settings, d, tokens: num(size) ? size : null, usd, isCold, isAbove }
 }
 
 // What the next send rewrites when the cache is cold and that costs more than the amount in Settings;
 // null otherwise
 async function coldSend($: EngineInterface) {
-  const settings = await read($, settingsA)
-  const d = await snapshotData($)
-  if (d.cacheLeft === null || d.cacheLeft > 0 || d.rewriteUsd === null) return null
-  const at = settings.coldAsk
-  const rate = settings.currency === 'eur' ? settings.eurRate : 1
-  if (at === 'off' || (at !== 'any' && d.rewriteUsd * rate < Number(at))) return null
+  const c = await coldState($)
+  if (!c.isAbove || c.usd === null) return null
   // On a subscription nothing is paid per send: the amount is what it would cost at API prices
-  const price = money(d.rewriteUsd, settings, '≈') + (d.billing.billing === 'api' ? '' : ' at API prices')
-  return k(d.s.compacted?.after ?? ctxTokens(d.usage)) + ' (' + price + ')'
+  const price = money(c.usd, c.settings, '≈') + (c.d.billing.billing === 'api' ? '' : ' at API prices')
+  return k(c.tokens) + ' (' + price + ')'
+}
+
+// A turn nobody typed is about to start: the cache as it finds it, and what Act does about a cold one
+// (case B): put in a summary Claude Code wrote ahead, else compact first, else (a prompt with images or
+// files, which can't be sent again whole) send it as is. Only from AWAY_FLOOR up and above the amount.
+async function wakeAt($: EngineInterface, origin: string, hasAttachments: boolean): Promise<Wake> {
+  const c = await coldState($)
+  const isBig = c.tokens !== null && c.tokens >= AWAY_FLOOR
+  const b: WakeAction = !c.isAbove || !isBig ? 'none' : precomputedAt > 0 ? 'use_summary' : hasAttachments ? 'sent_cold' : 'compact_first'
+  return { origin, at: c.d.now, tokens: c.tokens, cold: c.isCold, reloadUsd: c.isCold ? c.usd : null, b, act: c.settings.unattended === 'act', did: 'none' }
+}
+
+// Is this session a child another session started and still holds (not detached)? Asked through the
+// desktop app's own tool; denied, failed or not there (the terminal): no, origins alone decide
+async function isHeldChild($: EngineInterface) {
+  try {
+    const r = (await $.tool.call({ tool: 'mcp__ccd_session_mgmt__get_session', session_id: 'self' } as never)) as { deny?: unknown; isError?: unknown; result?: unknown; text?: unknown } | null
+    if (!r || typeof r !== 'object' || r.deny || r.isError) return false
+    const find = (v: unknown, depth: number): Record<string, unknown> | null => {
+      if (!v || typeof v !== 'object' || depth > 3) return null
+      const o = v as Record<string, unknown>
+      if ('parentSessionId' in o) return o
+      for (const child of Object.values(o)) {
+        const hit = find(child, depth + 1)
+        if (hit) return hit
+      }
+      return null
+    }
+    for (const v of [r.result, r.text]) {
+      try {
+        const rec = find(typeof v === 'string' ? JSON.parse(v) : v, 0)
+        if (rec) return typeof rec.parentSessionId === 'string' && rec.parentSessionId !== '' && rec.detached === false
+      } catch { /* not JSON: try the other field */ }
+    }
+  } catch {}
+  return false
+}
+
+// The event log's `wake` line, at the end of a turn nobody typed. `action`: what happened; `would`: what
+// Act would have done, under Count only too
+function logWake($: EngineInterface, wk: Wake, a: { isAbove: boolean; did: boolean; would: boolean }, now: number) {
+  if (!isEventLogOn()) return
+  const isSummaryIn = autoSummaryAt > 0 && autoSummaryAt >= wk.at - 10_000
+  const would: WakeAction = wk.b === 'compact_first' || wk.b === 'use_summary' ? wk.b : a.would ? 'compact_after' : isSummaryIn ? 'use_summary' : wk.b
+  const action: WakeAction = wk.did === 'compact_first' ? 'compact_first' : isSummaryIn ? 'use_summary' : a.did ? 'compact_after' : wk.cold ? 'sent_cold' : 'none'
+  void logEvent($, sid, 'wake', now, {
+    origin: wk.origin, tokens: firstTokens ?? wk.tokens, cold: wk.cold, reload_usd: num(wk.reloadUsd) ? usd6(wk.reloadUsd) : null,
+    above_target: a.isAbove, setting: wk.act ? 'act' : 'count', action, would, model: L.main.model,
+  })
 }
 
 // Cache pop-ups, the Cache Warmer and compacting while you are away, every 15 s between turns. While a
@@ -600,7 +730,7 @@ async function cacheTick($: EngineInterface) {
   if (!warming && isWarmAway(settings) && lastPromptAt > 0 && !warned.has('warm-end-' + lastPromptAt)) {
     toastOnce($, 'warm-end-' + lastPromptAt, 'Cache Warmer stopped')
     logWarmStop($, 'duration', d.now)
-    if (settings.away === 'warm-compact' && left > 0 && isBig) void startCompact($)
+    if (settings.away === 'warm-compact' && left > 0 && isBig) void startCompact($, '', false, 'away')
   }
   // "Compact": shortly before a 1 h cache goes cold, once per pause, under Claude Code's idle threshold
   // (from it on, Claude Code's own idle compaction writes its summary and puts it in when you return).
@@ -608,7 +738,7 @@ async function cacheTick($: EngineInterface) {
   const isUnderIdle = num(tokens) && (idleThreshold === null || tokens < idleThreshold)
   if (settings.away === 'compact' && d.ttlMin >= 60 && lastPromptAt > 0 && left > 0 && left <= COMPACT_BEFORE_MIN && isBig && isUnderIdle && !warned.has('away-' + lastPromptAt)) {
     warned.add('away-' + lastPromptAt)
-    return void startCompact($)
+    return void startCompact($, '', false, 'away')
   }
   if (left > 0 && left <= warnMinutes(d.ttlMin) && !warming) toastOnce($, 'cache-' + L.main.lastRequestAt, 'Cache: ' + Math.max(1, Math.ceil(left)) + 'm')
 }
@@ -647,7 +777,7 @@ function makeAct($: EngineInterface): Act {
       await bump($)
     },
     // Model calls run past a press's 10 s budget: start them on the clock, the press settles at once
-    compact: async () => { $.clock.after(0, () => void startCompact($, '', true)) },
+    compact: async () => { $.clock.after(0, () => void startCompact($, '', true, 'button')) },
   }
 }
 
@@ -804,6 +934,23 @@ export const register: Register = (on, options) => {
         isCompactOwed = false
       }
       isNextTurnAuto = isAuto
+      // A turn nobody typed (the mod's own sending again excepted: it continues one): what the cache is
+      // like, and under Act, compact first when it is cold (case B)
+      const isOwn = e.origin?.kind === 'plugin' && (e.origin as { name?: string }).name === PANE
+      nextWake = isAuto && !isOwn && !e.command ? await wakeAt($, e.origin.kind, !!e.attachments?.length).catch(() => null) : null
+      if (nextWake?.act && nextWake.b === 'compact_first') {
+        if (COMPACT_FIRST === 'hold-prompt') {
+          nextWake.did = 'compact_first'
+          isCompactOwed = true
+          isOwedByUser = false
+          owedCause = 'wake'
+          await startCompact($, '', false, 'wake').catch(() => undefined)
+        } else {
+          // turn.step skips the first request; the text goes again after the compaction. Only the
+          // desktop app's <system-reminder> blocks come off; the message's own wrapper stays.
+          resendFramed = e.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+        }
+      }
     }
     return next(e)
   })
@@ -815,6 +962,9 @@ export const register: Register = (on, options) => {
       const isAuto = isNextTurnAuto
       isNextTurnAuto = false
       isTurnAuto = isAuto
+      wake = isAuto ? nextWake : null
+      nextWake = null
+      firstTokens = null
       // You're back: the pause and its Cache Warmer start over with your message
       if (!isAuto) lastPromptAt = await $.clock.now()
     }
@@ -828,6 +978,27 @@ export const register: Register = (on, options) => {
   // putting it in costs almost nothing; without one, compacting first costs about the same now, but
   // every later message is cheaper.
   on('turn.step', async function* ($, e, next) {
+    // A started child's first turn: its brief came from the parent, nobody typed it. Asked once, not
+    // awaited here (the request goes on); turn.complete waits for the answer
+    if (!e.agentId && e.index === 0 && !wake && childCheck === undefined && s.turns === 0 && !L.main.requests) {
+      childCheck = isHeldChild($).then(isChild => {
+        if (!isChild || wake) return
+        isChildBrief = true
+        // No cold dialog for the rest of this turn
+        if (isWorking) isTurnAuto = true
+      }).catch(() => undefined)
+    }
+    // Compact-first (case B, the 'skip-turn' form): this turn nobody typed makes no request on the cold
+    // cache; the mod compacts after it and sends the text again, framed
+    if (wake?.act && wake.b === 'compact_first' && resendFramed && !e.agentId && e.index === 0 && COMPACT_FIRST === 'skip-turn') {
+      wake.did = 'compact_first'
+      isCompactOwed = true
+      isOwedByUser = false
+      owedCause = 'wake'
+      compactLater($)
+      $.ui.log('Token Report: a message nobody typed found the chat cold (' + k(wake.tokens) + '). Compacting first; it goes again right after.')
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
+    }
     if (askCold && !e.agentId && e.index === 0) {
       const cold = askCold
       const text = askText
@@ -858,6 +1029,7 @@ export const register: Register = (on, options) => {
         // After this (skipped) turn has ended; a refusal is tried again at the next quiet moment
         isCompactOwed = true
         isOwedByUser = true
+        owedCause = 'cold_send'
         compactLater($, resendFocus)
         return skipped
       }
@@ -890,6 +1062,7 @@ export const register: Register = (on, options) => {
       const endedAt = await $.clock.now()
       const model = (res.usage as { model?: string }).model || e.model
       const tools = (res.toolUses || []).map(t => t.name)
+      if (!e.agentId && e.index === 0) firstTokens = promptOf(toUsage(res.usage))
       const billing = detectBilling((await read($, settingsA)).billing, usage?.rateLimits, true)
       addRequest(L, { turnId: e.turnId, index: e.index, agentId: e.agentId || null, model, effort: e.effort, startedAt, endedAt, usage: toUsage(res.usage), tools }, mainTtlMin(billing.billing, seenTtl), SUB_TTL_MIN)
       await bump($)
@@ -965,7 +1138,17 @@ export const register: Register = (on, options) => {
     await saveAll($)
     await bump($)
     $.ui.invalidate('ui.render')
-    void checkTarget($).catch(() => undefined)
+    // A turn nobody typed: never a dialog, under Act compact after it above the threshold (case A),
+    // and a `wake` line in the event log. A started child's answer is in by now (or never comes)
+    // (at most 5 s: a call that hangs costs the line, not the turn)
+    if (childCheck) await Promise.race([childCheck, new Promise<void>(r => void $.clock.after(5_000, () => r()))])
+    let wk = wake
+    wake = null
+    if (isChildBrief && !wk) wk = await wakeAt($, 'child_brief', false).catch(() => null)
+    isChildBrief = false
+    const isAuto = isTurnAuto || !!wk
+    const a = await checkTarget($, isAuto, wk).catch(() => null)
+    if (wk && a) logWake($, wk, a, now)
     return next(e)
   })
 

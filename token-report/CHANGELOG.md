@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 (2026-11-10)
+
+New in v2: turns nobody typed. A message from another session, a notification, a schedule or a started session's brief starts a turn with nobody at the keyboard.
+
+- Settings → Context management → Turns nobody typed: **Count only** (default) or **Act**, for Global, Project or Session.
+- Count only: such a turn runs as it comes and never opens a window; Ask at the threshold becomes a pop-up. The event log notes what Act would have done.
+- Act: compacts after such a turn above the threshold, and before one that would reload a cold chat above the amount in "Ask before a cold send" (a summary Claude Code wrote ahead goes in instead, where there is one).
+- Event log: a `wake` line per such turn; `compact` lines gain the cause and the cost.
+- Fixed: Ask at the threshold no longer opens a window on a turn nobody typed.
+
 ## 1.2.0 (2026-11-10)
 
 - An event log, off by default. Set the mod's option "Event log folder" to a folder, and the mod adds one JSON line per event to `events-YYYY-MM.jsonl` there, for a dashboard or your own scripts to read: session start, plan-limit changes, compactions, the cold-send dialog and its choice, Cache Warmer start, pings and stop. Ids and numbers only, no prompt text. Left empty, the mod reads and writes nothing for it.
