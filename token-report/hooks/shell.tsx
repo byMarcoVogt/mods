@@ -1,10 +1,11 @@
-// The pane's frame: the title over four drawn cards (chat, cache, session, plan), then the Settings
-// page in its own rounded box.
+// The pane's frame: the title over four drawn cards (chat, cache, session, plan), two page buttons
+// (Settings, Agents), then the page in its own rounded box.
 import type { RenderElement } from 'claude-code'
 
 import { C, k, mins, money, type PageCtx } from './kit'
 import { sessionUsd } from './ledger'
 import { ctxTokens } from './line'
+import { drawAgents } from './pages/agents'
 import { drawSettings } from './pages/settings'
 
 export function drawShell(ctx: PageCtx): RenderElement {
@@ -28,13 +29,19 @@ export function drawShell(ctx: PageCtx): RenderElement {
     return Svg ? <Svg key={'card-' + label} source={svg} alt={label + ': ' + value} width={w} height={46} /> : <Text key={'card-' + label}>{label} {value}</Text>
   }
 
+  // Two pages: Settings (the default) and Agents; the one not shown is a plain button
+  const page = ctx.get('pane.page', 'settings') === 'agents' ? 'agents' : 'settings'
+  const { Button } = ctx.ui
+  const tab = (id: 'settings' | 'agents', label: string) =>
+    <Button key={'tab-' + id} {...(page === id ? {} : { plain: true as const })} label={label} onPress={() => ctx.set('pane.page', id)} />
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column" gap={1}>
-        <Text key="shell-title" bold>Token Report Settings</Text>
+        <Text key="shell-title" bold>Token Report</Text>
         <Box flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">{values.map(([l, v, c]) => card(l, v, c))}</Box>
+        <Box key="shell-tabs" flexDirection="row" gap={1}>{tab('settings', 'Settings')}{tab('agents', 'Agents')}</Box>
       </Box>
-      <Box flexDirection="column" borderStyle="round" borderColor={C.frame} paddingX={1}>{drawSettings(ctx)}</Box>
+      <Box flexDirection="column" borderStyle="round" borderColor={C.frame} paddingX={1}>{page === 'agents' ? drawAgents(ctx) : drawSettings(ctx)}</Box>
     </Box>
   )
 }

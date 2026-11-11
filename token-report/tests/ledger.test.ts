@@ -124,3 +124,32 @@ test('cost split by kind for main and agents, agents tied to their turn', () => 
   expect(L.turns.B!.agents).toBe(2)
   expect(L.turns.A!.rewrites).toBe(1)
 })
+
+// v2 slice 3: per-agent sums the Agents page and agent_end read, whole after requests are cut
+test('agents: token kinds, the Sonnet price of the same requests and tool kinds are summed per agent', () => {
+  const L = newLedger('s', 0, 1)
+  noteAgentStart(L, 'a1', { model: 'claude-opus-5-5', cls: 'gather', would: 'hand_back', named: '', at: 0 })
+  addRequest(L, { turnId: 't', index: 0, agentId: 'a1', model: 'claude-opus-5-5', startedAt: 1, endedAt: 2, usage: u(1_000, 100_000, 10_000, 2_000), tools: ['WebFetch', 'Read', 'Edit'] }, 60, 5)
+  addRequest(L, { turnId: 't', index: 1, agentId: null, model: 'claude-sonnet-5-5', startedAt: 3, endedAt: 4, usage: u(0, 50_000, 0, 100), tools: [] }, 60, 5)
+  const a = L.agents.a1!
+  expect(a.cls).toBe('gather')
+  expect(a.would).toBe('hand_back')
+  expect(a.usage).toEqual(u(1_000, 100_000, 10_000, 2_000))
+  expect(a.tools).toEqual({ web: 1, browser: 0, read: 1, write: 1, other: 0 })
+  // Same tokens on Sonnet at the agents' 5 min writes
+  close(a.onSonnet, usdOf(u(1_000, 100_000, 10_000, 2_000), 'claude-sonnet-5-5', '5m'))
+  // A Sonnet request costs the same on Sonnet; the ledger's total covers main and agents
+  close(L.onSonnet, a.onSonnet + L.main.usd)
+})
+
+test('agents: a ledger stored before slice 3 restores with zero sums', () => {
+  const L = newLedger('s', 0, 1)
+  noteAgentStart(L, 'a1', { model: 'claude-opus-5-5', at: 0 })
+  const old = JSON.parse(JSON.stringify(L))
+  delete old.onSonnet
+  delete old.agents.a1.usage; delete old.agents.a1.onSonnet; delete old.agents.a1.tools
+  const r = restore(old)!
+  expect(r.onSonnet).toBe(0)
+  expect(r.agents.a1!.tools.write).toBe(0)
+  expect(r.agents.a1!.usage.input).toBe(0)
+})

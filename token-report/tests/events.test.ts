@@ -128,6 +128,8 @@ test('a turn writes session_start once and one limit row per limit that changed'
   expect(w.rows('session_start')).toEqual([{
     ts: '2026-11-10T09:00:00.000Z', session: 'live', kind: 'session_start',
     model: 'claude-opus-5-5', billing: 'subscription', billing_setting: 'auto', cache_ttl_min: 60, mod_version: '',
+    // v2 slice 3: who this session is in the desktop app (none here: no get_session answer), and its profile
+    local_id: null, parent: null, profile: 'auto',
   }])
   expect(w.rows('limit').map(r => [r.limit, r.percent_used, r.resets_at])).toEqual([['five_hour', 40, RESET], ['seven_day', 81, RESET]])
   // Nothing moved: no new row

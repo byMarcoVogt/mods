@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.0 (2026-11-10)
+
+New in v2: the Agents page and the profile.
+
+- **Agents page**, beside Settings in the pane: which agents and sessions this session set going, on which model, what they cost, and where a cheaper choice existed. It shows what they actually cost against the plan the Managed profile would have followed (with that plan's assumption printed under it), the sessions started below this one (up to three layers deep), and this session's agents by kind and model. A started session reports its figures to the session above it at the end of each turn; one that runs an older version, on another machine or in the cloud reads "not reported".
+- **Profile**, the first row in Settings: **Auto** (default) only counts, **Managed** steps in. It sets Turns nobody typed, Agent starts and Session starts together; a row changed by hand in the same or a narrower scope wins and is named beside the profile. With no profile stored you get Auto, and rows you set by hand before keep their values.
+- One button on the Agents page, "Use Managed in ‹project›", only when Managed would change something.
+- Event log: `session_start` gains the session's local id, its parent and the profile.
+
 ## 1.4.0 (2026-11-10)
 
 New in v2: agent and session starts. Settings gain a section, Agents and side sessions, with two rows for Global, Project or Session. Both default to **Count only**: starts go ahead as asked and are counted.
