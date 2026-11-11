@@ -202,6 +202,16 @@ export function drawSettings(ctx: PageCtx): RenderElement {
           },
         },
         {
+          id: 'unattended', label: 'Turns nobody typed',
+          choice: { key: 'unattended', choices: [opt('count', 'Count only'), opt('act', 'Act')] },
+          info: {
+            lines: [
+              ['Count only', 'A message from another session, a notification or a schedule runs as it comes. Never a window: Ask becomes a pop-up.'],
+              ['Act', 'Compacts after such a turn above the threshold, and before one that would reload a cold chat above the amount in Ask before a cold send. Meant for a project where you orchestrate.'],
+            ],
+          },
+        },
+        {
           id: 'compactNote', label: '/compact', hasCompactButton: true,
           text: { key: 'compactNote', placeholder: 'e.g. keep the plan, open tasks and file paths' },
           info: { note: 'Text added to the /compact prompt, e.g. "keep the plan, open tasks and file paths". Used for every summary Token Report starts, and for Claude Code\'s own summary while you\'re away.' + (s.compactNote ? '\nYours: "' + s.compactNote + '"' : '') },

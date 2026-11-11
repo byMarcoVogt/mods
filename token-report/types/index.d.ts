@@ -10,6 +10,10 @@ export type Settings = {
   // compact: /compact right after that turn, while the cache is warm
   contextTarget: number
   atTarget: 'off' | 'remind' | 'ask' | 'compact'
+  // Turns nobody typed (a peer session's message, a notification, a schedule, a started child's brief).
+  // count: behave as on any turn but never a dialog, and log what act would have done · act: compact
+  // after such a turn above the threshold, and compact before one that wakes a cold cache
+  unattended: 'count' | 'act'
   // Cache management, while you are away: two by two. Cache Warmer or not, then compact or keep the full
   // chat. Compact: under Claude Code's idle compaction threshold the mod compacts shortly before the cache
   // goes cold; from it on, Claude Code's own idle compaction does. Keep full: neither compacts (Claude
