@@ -1,7 +1,7 @@
 // Ledger maths: prices, requests, rewrites, clocks, snapshots, and how money reads.
 import { test, expect } from 'claude-code/testing'
 import {
-  priceFor, partsOf, sumParts, newLedger, addRequest, isRewrite, clockLeft, ledgerUsd,
+  priceFor, PRICE_STAND, partsOf, sumParts, newLedger, addRequest, isRewrite, clockLeft, ledgerUsd,
   noteAgentStart, noteAgentEnd, snapshot, restore, type Ttl, type Usage,
 } from '../hooks/ledger'
 import { money } from '../hooks/kit'
@@ -16,12 +16,22 @@ test('prices: list prices per model, Haiku 5.5 tier above 100k, unknown falls ba
   expect(priceFor('claude-sonnet-5-5').write5m).toBe(2.5)
   expect(priceFor('claude-haiku-5-5', 50_000).input).toBe(0.1)
   expect(priceFor('claude-haiku-5-5', 150_000).input).toBe(0.5)
-  expect(priceFor('claude-haiku-5-5').derived).toBe(true)
+  close(priceFor('claude-haiku-5-5', 150_000).cacheRead, 0.05)
   expect(priceFor('something-new').input).toBe(4)
 })
 
+test('prices: the table loads from prices.json and prices one known request', () => {
+  expect(PRICE_STAND).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  // Opus 5.5, 1h cache: 1k input × 4 + 100k read × 0.20 + 10k write × 8 + 2k output × 20 = 0.144 $
+  close(usdOf(u(1_000, 100_000, 10_000, 2_000), 'claude-opus-5-5', '1h'), 0.144)
+  // longest key wins: Opus 5 is not Opus 5.5, Fable 5.2 is not Fable 5.1
+  expect(priceFor('claude-opus-5').input).toBe(5)
+  expect(priceFor('claude-fable-5-2').cacheRead).toBe(0.2)
+  expect(priceFor('claude-sonnet-4-6').cacheRead).toBe(0.3)
+})
+
 test('prices: an unknown id takes its family, only a nameless one Opus 5.5', () => {
-  expect(priceFor('claude-sonnet-4-6').cacheRead).toBe(priceFor('claude-sonnet-5-5').cacheRead)
+  expect(priceFor('claude-sonnet-9').cacheRead).toBe(priceFor('claude-sonnet-5-5').cacheRead)
   expect(priceFor('us.anthropic.claude-haiku-9').input).toBe(priceFor('claude-haiku-5-5').input)
   expect(priceFor('claude-fable-5').output).toBe(priceFor('claude-fable-5-1').output)
   expect(priceFor('some-gateway-model').input).toBe(priceFor('claude-opus-5-5').input)
