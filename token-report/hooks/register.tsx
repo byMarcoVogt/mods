@@ -103,6 +103,10 @@ const AUTO_ORIGINS = new Set(['task-notification', 'scheduled-trigger', 'peer', 
 const WARM_NOTICE_MS = 10 * 60_000
 // What your message's first request would rewrite, asked about before it is sent ('' = no question)
 let askCold = ''
+// The running main turn came from no person: nobody would answer a cold dialog in the middle of it
+let isTurnAuto = false
+// Main-thread AskUserQuestion calls waiting on your answer: the turn runs, but nothing is sent meanwhile
+let waitingAsks = 0
 // A failed ping waits a minute before the next try (else every 15 s tick tried again)
 let pingFailedAt = 0
 const PING_RETRY_MS = 60_000
@@ -393,23 +397,32 @@ async function compactNow($: EngineInterface, focus = '') {
     // The desktop app hosts sessions over the SDK, where $.session.compact is not available: there a
     // compaction runs inside a turn, as the /compact command ($.prompt.submit refuses a text starting with /)
     if (/not available/i.test(String(err))) {
-      isCompactOwed = false
       try {
         await $.command.run(instructions ? { command: 'compact', args: instructions } : { command: 'compact' })
+        isCompactOwed = false
       } catch (err2) {
-        resendText = ''
-        $.ui.toast('Compaction failed: ' + String(err2) + (focus ? '. Your message was not sent again.' : ''))
+        refused($, err2, focus)
       }
       return
     }
-    // Refused while a turn runs: tried again at the next quiet moment when one is owed, else say so
-    if (!isCompactOwed) {
-      $.ui.toast('Compaction failed: ' + String(err) + (resendText ? '. Your message was not sent again.' : ''))
-      resendText = ''
-    }
+    refused($, err, focus)
   } finally {
     isCompacting = false
   }
+}
+
+// A compaction Claude Code refused. While a turn runs (a press on ⤓, the threshold, an away compaction
+// during a long turn) it is only queued: owed, and run at the next quiet moment (the turn's end or the
+// 15 s tick), with the message waiting for it kept. Between turns a refusal is a real failure: say so.
+function refused($: EngineInterface, err: unknown, focus: string) {
+  if (isWorking) {
+    isCompactOwed = true
+    toastOnce($, 'compact-queued-' + s.compactions, 'Compaction queued: runs after this turn')
+    return
+  }
+  isCompactOwed = false
+  $.ui.toast('Compaction failed: ' + String(err) + (focus || resendText ? '. Your message was not sent again.' : ''))
+  resendText = ''
 }
 
 // Context management, checked after each main turn. Once a turn crosses the threshold, and again at
@@ -466,9 +479,17 @@ async function coldSend($: EngineInterface) {
   return k(d.s.compacted?.after ?? ctxTokens(d.usage)) + ' (' + price + ')'
 }
 
-// Cache pop-ups, the Cache Warmer and compacting while you are away, every 15 s between turns
+// Cache pop-ups, the Cache Warmer and compacting while you are away, every 15 s between turns. While a
+// turn waits on a question to you, only the pop-up: Claude Code refuses a compaction inside a turn, and
+// a Cache Warmer fork would replay a request whose question has no answer yet.
 async function cacheTick($: EngineInterface) {
-  if (isWorking) return
+  if (isWorking && waitingAsks === 0) return
+  if (isWorking) {
+    const d = await snapshotData($)
+    const left = d.cacheLeft
+    if (left !== null && left > 0 && left <= warnMinutes(d.ttlMin)) toastOnce($, 'cache-' + L.main.lastRequestAt, 'Cache: ' + Math.max(1, Math.ceil(left)) + 'm (a question is waiting for you)')
+    return
+  }
   if (isCompactOwed) return void compactNow($)
   const settings = await read($, settingsA)
   const d = await snapshotData($)
@@ -607,14 +628,17 @@ export const register: Register = on => {
     return { text: 'Token Report opened.' }
   })
 
-  // /model while the cache is warm: Claude Code asks first, with the price of the switch
+  // A model switch while the cache is warm goes through; a toast names what it re-caches. No 'ask': the
+  // desktop app shows no dialog for it and blocks the switch instead (found 2026-11-10)
   on('classic.PreModelSwitch', async ($, e, next) => {
     seenTtl = e.cache_ttl
     const settings = await read($, settingsA)
     const r = await next(e)
     if (!e.prompt_cache_warm || !num(e.estimated_cache_write_usd) || e.estimated_cache_write_usd * (settings.currency === 'eur' ? settings.eurRate : 1) < 0.05) return r
-    if (r && r.permissionDecision) return r
-    return { ...(r || {}), permissionDecision: 'ask' as const, permissionDecisionReason: 'The cache is warm: switching re-caches ' + k(e.context_tokens) + ' tokens on ' + e.to_model.replace('claude-', '') + ', ' + money(e.estimated_cache_write_usd, settings) + ' at list price.' }
+    // Another hook refused or asked: its word stands, and no price for a switch that may not happen
+    if (r && r.permissionDecision && r.permissionDecision !== 'allow') return r
+    $.ui.toast('Model switch: re-caches ' + k(e.context_tokens) + ' on ' + e.to_model.replace('claude-', '') + ', ' + money(e.estimated_cache_write_usd, settings) + ' at list price')
+    return r
   })
 
   // Claude Code's idle compaction writes its summary ahead (`precompute`) ~54 min into a pause, once
@@ -692,8 +716,10 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) {
       isWorking = true
+      waitingAsks = 0
       const isAuto = isNextTurnAuto
       isNextTurnAuto = false
+      isTurnAuto = isAuto
       // You're back: the pause and its Cache Warmer start over with your message
       if (!isAuto) lastPromptAt = await $.clock.now()
     }
@@ -738,6 +764,21 @@ export const register: Register = on => {
         compactLater($, resendFocus)
         return skipped
       }
+    } else if (!e.agentId && e.index > 0 && !isTurnAuto) {
+      // A turn that resumes after a long wait (your answer to a question, a long tool): its next request
+      // goes on a cold cache too, and no message of yours passed prompt.submit to ask first. No compact
+      // choice here: Claude Code refuses a compaction inside a turn. Cancel ends the turn before the
+      // request; what came in (your answer, the tool's result) stays in the chat and goes with your next
+      // message. Closing the dialog cancels; with no surface drawing it, the request goes.
+      const cold = await coldSend($)
+      if (cold) {
+        const answer = await $.ui.ask('Your chat went cold while it waited. Going on reloads all ' + cold + '. Go on now?', { header: 'Cold cache', options: ['Send anyway', 'Cancel'] })
+          .catch(async () => ((await $.session.surfaces().catch(() => [])).length ? 'Cancel' : 'Send anyway'))
+        if (answer === 'Cancel') {
+          $.ui.log('Token Report: stopped before going on, the cache is cold (' + cold + '). Your answer stays in the chat; send any message to go on.')
+          return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
+        }
+      }
     }
     const startedAt = await $.clock.now()
     const it = next(e)
@@ -756,6 +797,17 @@ export const register: Register = on => {
       await bump($)
     }
     return res
+  })
+
+  // A question to you on the main thread: the turn stays open until you answer (see cacheTick)
+  on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
+    if (e.agentId) return next(e)
+    waitingAsks += 1
+    try {
+      return await next(e)
+    } finally {
+      waitingAsks = Math.max(0, waitingAsks - 1)
+    }
   })
 
   on('agent.spawn', async ($, e, next) => {
@@ -779,6 +831,7 @@ export const register: Register = on => {
       return next(e)
     }
     isWorking = false
+    waitingAsks = 0
     await refresh($)
     const u = e.usage
     if (u) {
